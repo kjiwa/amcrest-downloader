@@ -9,6 +9,12 @@ from models import Recording, TimeRange
 
 
 class AmcrestClient:
+    DEFAULT_TIMEOUT = 10
+    SEARCH_TIMEOUT = 30
+    DOWNLOAD_TIMEOUT = 60
+    BATCH_SIZE = 100
+    CHUNK_SIZE = 8192
+
     def __init__(self, host: str, username: str, password: str):
         self._host = host.rstrip("/")
         self._auth = HTTPDigestAuth(username, password)
@@ -28,8 +34,10 @@ class AmcrestClient:
         return url
 
     def _get(
-        self, endpoint: str, params: dict = None, timeout: int = 10
+        self, endpoint: str, params: dict = None, timeout: int = None
     ) -> requests.Response:
+        if timeout is None:
+            timeout = self.DEFAULT_TIMEOUT
         url = self._build_url(endpoint, params)
         response = self._session.get(url, timeout=timeout)
         response.raise_for_status()
@@ -58,6 +66,14 @@ class AmcrestClient:
     def _fetch_recordings(
         self, object_id: str, start_time: str, end_time: str, channel: int
     ) -> list[Recording]:
+        self._initiate_search(object_id, start_time, end_time, channel)
+        recordings = self._collect_all_batches(object_id)
+        self._close_finder(object_id)
+        return recordings
+
+    def _initiate_search(
+        self, object_id: str, start_time: str, end_time: str, channel: int
+    ) -> None:
         params = {
             "action": "findFile",
             "object": object_id,
@@ -65,12 +81,17 @@ class AmcrestClient:
             "condition.StartTime": start_time,
             "condition.EndTime": end_time,
         }
-        response = self._get("/cgi-bin/mediaFileFind.cgi", params=params, timeout=30)
+        response = self._get(
+            "/cgi-bin/mediaFileFind.cgi", params=params, timeout=self.SEARCH_TIMEOUT
+        )
+        self._validate_search_response(response.text, object_id)
 
-        if "ok" not in response.text.lower():
+    def _validate_search_response(self, response_text: str, object_id: str) -> None:
+        if "ok" not in response_text.lower():
             self._close_finder(object_id)
-            raise RuntimeError(f"Search failed: {response.text}")
+            raise RuntimeError(f"Search failed: {response_text}")
 
+    def _collect_all_batches(self, object_id: str) -> list[Recording]:
         recordings = []
         while True:
             next_response = self._fetch_next_batch(object_id)
@@ -82,17 +103,17 @@ class AmcrestClient:
                 break
 
             recordings.extend(batch_recordings)
-
-        self._close_finder(object_id)
         return recordings
 
-    def _fetch_next_batch(self, object_id: str, count: int = 100) -> str:
+    def _fetch_next_batch(self, object_id: str) -> str:
         params = {
             "action": "findNextFile",
             "object": object_id,
-            "count": count,
+            "count": self.BATCH_SIZE,
         }
-        response = self._get("/cgi-bin/mediaFileFind.cgi", params=params, timeout=30)
+        response = self._get(
+            "/cgi-bin/mediaFileFind.cgi", params=params, timeout=self.SEARCH_TIMEOUT
+        )
 
         lines = response.text.split("\n", 1)
         if not lines:
@@ -121,37 +142,45 @@ class AmcrestClient:
             if not line or line.startswith("found="):
                 continue
 
-            if (
-                line.startswith("items[")
-                and current_file
-                and "FilePath" in current_file
-            ):
+            if line.startswith("items[") and self._is_complete_recording(current_file):
                 try:
                     recording = self._create_recording(current_file)
-                    if ".mp4" in str(recording.file_path):
+                    if self._should_include_recording(recording):
                         recordings.append(recording)
                 except Exception:
                     pass
                 current_file = {}
 
-            if ".FilePath=" in line:
-                current_file["FilePath"] = line.split("=", 1)[1]
-            elif ".StartTime=" in line:
-                current_file["StartTime"] = line.split("=", 1)[1]
-            elif ".EndTime=" in line:
-                current_file["EndTime"] = line.split("=", 1)[1]
-            elif ".Channel=" in line:
-                current_file["Channel"] = int(line.split("=", 1)[1])
+            key, value = self._parse_recording_line(line)
+            if key:
+                current_file[key] = value
 
-        if current_file and "FilePath" in current_file and "StartTime" in current_file:
+        if self._is_complete_recording(current_file):
             try:
                 recording = self._create_recording(current_file)
-                if ".mp4" in str(recording.file_path):
+                if self._should_include_recording(recording):
                     recordings.append(recording)
             except Exception:
                 pass
 
         return recordings
+
+    def _parse_recording_line(self, line: str) -> tuple[Optional[str], Optional[str]]:
+        if ".FilePath=" in line:
+            return "FilePath", line.split("=", 1)[1]
+        elif ".StartTime=" in line:
+            return "StartTime", line.split("=", 1)[1]
+        elif ".EndTime=" in line:
+            return "EndTime", line.split("=", 1)[1]
+        elif ".Channel=" in line:
+            return "Channel", int(line.split("=", 1)[1])
+        return None, None
+
+    def _is_complete_recording(self, file_data: dict) -> bool:
+        return "FilePath" in file_data and "StartTime" in file_data
+
+    def _should_include_recording(self, recording: Recording) -> bool:
+        return ".mp4" in str(recording.file_path)
 
     def _create_recording(self, file_data: dict) -> Recording:
         start_time = datetime.strptime(file_data["StartTime"], "%Y-%m-%d %H:%M:%S")
@@ -183,13 +212,15 @@ class AmcrestClient:
         url = self._build_url(endpoint)
 
         try:
-            response = self._session.get(url, stream=True, timeout=60)
+            response = self._session.get(
+                url, stream=True, timeout=self.DOWNLOAD_TIMEOUT
+            )
             response.raise_for_status()
 
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
             with open(output_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
+                for chunk in response.iter_content(chunk_size=self.CHUNK_SIZE):
                     if chunk:
                         f.write(chunk)
 
