@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
-from urllib.parse import quote
+from urllib.parse import urlencode, quote
 import requests
 from requests.auth import HTTPDigestAuth
 
@@ -15,23 +15,33 @@ class AmcrestClient:
         self._session = requests.Session()
         self._session.auth = self._auth
 
-    def _build_url(self, endpoint: str) -> str:
+    def _build_url(self, endpoint: str, params: dict = None) -> str:
         if not endpoint.startswith("/"):
             endpoint = f"/{endpoint}"
-        return f"http://{self._host}{endpoint}"
+
+        url = f"http://{self._host}{endpoint}"
+
+        if params:
+            encoded_params = urlencode(params, quote_via=quote, safe="")
+            url = f"{url}?{encoded_params}"
+
+        return url
+
+    def _get(
+        self, endpoint: str, params: dict = None, timeout: int = 10
+    ) -> requests.Response:
+        url = self._build_url(endpoint, params)
+        response = self._session.get(url, timeout=timeout)
+        response.raise_for_status()
+        return response
 
     def find_recordings(
         self, time_range: TimeRange, channel: int = 0
     ) -> list[Recording]:
         start_str, end_str = time_range.to_amcrest_format()
 
-        url = self._build_url("/cgi-bin/mediaFileFind.cgi")
-        params = {
-            "action": "factory.create",
-        }
-
-        response = self._session.get(url, params=params, timeout=10)
-        response.raise_for_status()
+        params = {"action": "factory.create"}
+        response = self._get("/cgi-bin/mediaFileFind.cgi", params=params)
 
         object_id = self._parse_object_id(response.text)
         if not object_id:
@@ -48,17 +58,14 @@ class AmcrestClient:
     def _fetch_recordings(
         self, object_id: str, start_time: str, end_time: str, channel: int
     ) -> list[Recording]:
-        start_encoded = quote(start_time, safe="")
-        end_encoded = quote(end_time, safe="")
-
-        url = self._build_url(
-            f"/cgi-bin/mediaFileFind.cgi?action=findFile&object={object_id}&"
-            f"condition.Channel={channel}&condition.StartTime={start_encoded}&"
-            f"condition.EndTime={end_encoded}"
-        )
-
-        response = self._session.get(url, timeout=30)
-        response.raise_for_status()
+        params = {
+            "action": "findFile",
+            "object": object_id,
+            "condition.Channel": channel,
+            "condition.StartTime": start_time,
+            "condition.EndTime": end_time,
+        }
+        response = self._get("/cgi-bin/mediaFileFind.cgi", params=params, timeout=30)
 
         if "ok" not in response.text.lower():
             self._close_finder(object_id)
@@ -80,13 +87,12 @@ class AmcrestClient:
         return recordings
 
     def _fetch_next_batch(self, object_id: str, count: int = 100) -> str:
-        url = self._build_url(
-            f"/cgi-bin/mediaFileFind.cgi?action=findNextFile&"
-            f"object={object_id}&count={count}"
-        )
-
-        response = self._session.get(url, timeout=30)
-        response.raise_for_status()
+        params = {
+            "action": "findNextFile",
+            "object": object_id,
+            "count": count,
+        }
+        response = self._get("/cgi-bin/mediaFileFind.cgi", params=params, timeout=30)
 
         lines = response.text.split("\n", 1)
         if not lines:
@@ -162,17 +168,19 @@ class AmcrestClient:
         )
 
     def _close_finder(self, object_id: str):
-        url = self._build_url(
-            f"/cgi-bin/mediaFileFind.cgi?action=destroy&object={object_id}"
-        )
+        params = {
+            "action": "destroy",
+            "object": object_id,
+        }
         try:
-            self._session.get(url, timeout=10)
+            self._get("/cgi-bin/mediaFileFind.cgi", params=params)
         except Exception:
             pass
 
     def download_recording(self, recording: Recording, output_path: Path) -> bool:
         file_path = str(recording.file_path)
-        url = self._build_url(f"/cgi-bin/RPC_Loadfile{file_path}")
+        endpoint = f"/cgi-bin/RPC_Loadfile{file_path}"
+        url = self._build_url(endpoint)
 
         try:
             response = self._session.get(url, stream=True, timeout=60)
