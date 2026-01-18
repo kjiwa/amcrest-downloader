@@ -24,21 +24,24 @@ class RecordingDownloader:
 
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        futures = self._submit_download_tasks(recordings, output_dir)
-        downloaded_files = self._await_completion(futures, progress_callback)
+        with ThreadPoolExecutor(max_workers=self._max_concurrent) as executor:
+            futures = self._submit_download_tasks(recordings, output_dir, executor)
+            downloaded_files = self._await_completion(futures, progress_callback)
 
         return sorted(downloaded_files)
 
     def _submit_download_tasks(
-        self, recordings: list[Recording], output_dir: Path
+        self,
+        recordings: list[Recording],
+        output_dir: Path,
+        executor: ThreadPoolExecutor,
     ) -> dict:
-        executor = ThreadPoolExecutor(max_workers=self._max_concurrent)
         futures = {}
 
         for idx, recording in enumerate(recordings):
             output_file = self._generate_filename(recording, output_dir, idx)
             future = executor.submit(self._download_with_retry, recording, output_file)
-            futures[future] = (recording, output_file, executor)
+            futures[future] = (recording, output_file)
 
         return futures
 
@@ -48,25 +51,20 @@ class RecordingDownloader:
         downloaded_files = []
         completed = 0
         total = len(futures)
-        executor = None
 
-        try:
-            for future in as_completed(futures):
-                recording, output_file, executor = futures[future]
+        for future in as_completed(futures):
+            recording, output_file = futures[future]
 
-                try:
-                    success = self._handle_download_result(future)
-                    if success:
-                        downloaded_files.append(output_file)
-                except Exception:
-                    pass
+            try:
+                success = self._handle_download_result(future)
+                if success:
+                    downloaded_files.append(output_file)
+            except Exception:
+                pass
 
-                completed += 1
-                if progress_callback:
-                    progress_callback(completed, total)
-        finally:
-            if executor:
-                executor.shutdown(wait=True)
+            completed += 1
+            if progress_callback:
+                progress_callback(completed, total)
 
         return downloaded_files
 
