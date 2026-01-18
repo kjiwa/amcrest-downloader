@@ -1,0 +1,195 @@
+from pathlib import Path
+from typing import Optional
+from datetime import datetime
+from urllib.parse import quote
+import requests
+from requests.auth import HTTPDigestAuth
+
+from models import Recording, TimeRange
+
+
+class AmcrestClient:
+    def __init__(self, host: str, username: str, password: str):
+        self._host = host.rstrip("/")
+        self._auth = HTTPDigestAuth(username, password)
+        self._session = requests.Session()
+        self._session.auth = self._auth
+
+    def _build_url(self, endpoint: str) -> str:
+        if not endpoint.startswith("/"):
+            endpoint = f"/{endpoint}"
+        return f"http://{self._host}{endpoint}"
+
+    def find_recordings(
+        self, time_range: TimeRange, channel: int = 0
+    ) -> list[Recording]:
+        start_str, end_str = time_range.to_amcrest_format()
+
+        url = self._build_url("/cgi-bin/mediaFileFind.cgi")
+        params = {
+            "action": "factory.create",
+        }
+
+        response = self._session.get(url, params=params, timeout=10)
+        response.raise_for_status()
+
+        object_id = self._parse_object_id(response.text)
+        if not object_id:
+            raise RuntimeError("Failed to create media file finder")
+
+        return self._fetch_recordings(object_id, start_str, end_str, channel)
+
+    def _parse_object_id(self, response_text: str) -> Optional[str]:
+        for line in response_text.splitlines():
+            if line.startswith("result="):
+                return line.split("=", 1)[1].strip()
+        return None
+
+    def _fetch_recordings(
+        self, object_id: str, start_time: str, end_time: str, channel: int
+    ) -> list[Recording]:
+        start_encoded = quote(start_time, safe="")
+        end_encoded = quote(end_time, safe="")
+
+        url = self._build_url(
+            f"/cgi-bin/mediaFileFind.cgi?action=findFile&object={object_id}&"
+            f"condition.Channel={channel}&condition.StartTime={start_encoded}&"
+            f"condition.EndTime={end_encoded}"
+        )
+
+        response = self._session.get(url, timeout=30)
+        response.raise_for_status()
+
+        if "ok" not in response.text.lower():
+            self._close_finder(object_id)
+            raise RuntimeError(f"Search failed: {response.text}")
+
+        recordings = []
+        while True:
+            next_response = self._fetch_next_batch(object_id)
+            if not next_response:
+                break
+
+            batch_recordings = self._parse_recordings(next_response)
+            if not batch_recordings:
+                break
+
+            recordings.extend(batch_recordings)
+
+        self._close_finder(object_id)
+        return recordings
+
+    def _fetch_next_batch(self, object_id: str, count: int = 100) -> str:
+        url = self._build_url(
+            f"/cgi-bin/mediaFileFind.cgi?action=findNextFile&"
+            f"object={object_id}&count={count}"
+        )
+
+        response = self._session.get(url, timeout=30)
+        response.raise_for_status()
+
+        lines = response.text.split("\n", 1)
+        if not lines:
+            return ""
+
+        first_line = lines[0].strip()
+        if not first_line.startswith("found="):
+            return ""
+
+        count_str = first_line.split("=", 1)[1]
+        try:
+            file_count = int(count_str)
+            if file_count == 0:
+                return ""
+        except ValueError:
+            return ""
+
+        return response.text
+
+    def _parse_recordings(self, response_text: str) -> list[Recording]:
+        recordings = []
+        current_file = {}
+
+        for line in response_text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("found="):
+                continue
+
+            if (
+                line.startswith("items[")
+                and current_file
+                and "FilePath" in current_file
+            ):
+                try:
+                    recording = self._create_recording(current_file)
+                    if ".mp4" in str(recording.file_path):
+                        recordings.append(recording)
+                except Exception:
+                    pass
+                current_file = {}
+
+            if ".FilePath=" in line:
+                current_file["FilePath"] = line.split("=", 1)[1]
+            elif ".StartTime=" in line:
+                current_file["StartTime"] = line.split("=", 1)[1]
+            elif ".EndTime=" in line:
+                current_file["EndTime"] = line.split("=", 1)[1]
+            elif ".Channel=" in line:
+                current_file["Channel"] = int(line.split("=", 1)[1])
+
+        if current_file and "FilePath" in current_file and "StartTime" in current_file:
+            try:
+                recording = self._create_recording(current_file)
+                if ".mp4" in str(recording.file_path):
+                    recordings.append(recording)
+            except Exception:
+                pass
+
+        return recordings
+
+    def _create_recording(self, file_data: dict) -> Recording:
+        start_time = datetime.strptime(file_data["StartTime"], "%Y-%m-%d %H:%M:%S")
+        end_time = datetime.strptime(file_data["EndTime"], "%Y-%m-%d %H:%M:%S")
+
+        file_path = Path(file_data["FilePath"])
+        channel = file_data.get("Channel", 0)
+
+        return Recording(
+            start_time=start_time,
+            end_time=end_time,
+            file_path=file_path,
+            channel=channel,
+        )
+
+    def _close_finder(self, object_id: str):
+        url = self._build_url(
+            f"/cgi-bin/mediaFileFind.cgi?action=destroy&object={object_id}"
+        )
+        try:
+            self._session.get(url, timeout=10)
+        except Exception:
+            pass
+
+    def download_recording(self, recording: Recording, output_path: Path) -> bool:
+        file_path = str(recording.file_path)
+        url = self._build_url(f"/cgi-bin/RPC_Loadfile{file_path}")
+
+        try:
+            response = self._session.get(url, stream=True, timeout=60)
+            response.raise_for_status()
+
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            with open(output_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+
+            return True
+        except Exception as e:
+            if output_path.exists():
+                output_path.unlink()
+            raise RuntimeError(f"Failed to download recording: {e}")
+
+    def close(self):
+        self._session.close()
