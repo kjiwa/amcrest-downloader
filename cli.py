@@ -90,6 +90,7 @@ class CLI:
                     parsed_args.output_format,
                     time_range,
                 )
+
                 if not self._merge_recordings(
                     downloaded_files,
                     output_file,
@@ -99,6 +100,7 @@ class CLI:
                     return 1
 
                 self._cleanup_work_dir(parsed_args.output_dir, parsed_args.keep_files)
+                print(f"Successfully created: {output_file}")
                 return 0
 
             finally:
@@ -174,9 +176,7 @@ class CLI:
         merger = VideoMerger(output_format)
         success = merger.merge(downloaded_files, output_file, cleanup=not keep_files)
 
-        if success:
-            print(f"Successfully created: {output_file}")
-        else:
+        if not success:
             print("Merge failed.", file=sys.stderr)
 
         return success
