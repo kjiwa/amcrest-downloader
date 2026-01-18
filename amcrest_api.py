@@ -9,6 +9,15 @@ from models import Recording, TimeRange
 
 
 class AmcrestClient:
+    """Client for interacting with Amcrest camera API.
+
+    Recording search follows a 4-step protocol:
+    1. Create a media file finder (factory.create)
+    2. Start the search (findFile)
+    3. Retrieve results in batches (findNextFile)
+    4. Destroy the finder (destroy)
+    """
+
     DEFAULT_TIMEOUT = 10
     SEARCH_TIMEOUT = 30
     DOWNLOAD_TIMEOUT = 60
@@ -48,6 +57,15 @@ class AmcrestClient:
     ) -> list[Recording]:
         start_str, end_str = time_range.to_amcrest_format()
 
+        finder_id = self._create_finder()
+        try:
+            self._start_search(finder_id, start_str, end_str, channel)
+            recordings = self._retrieve_all_results(finder_id)
+            return recordings
+        finally:
+            self._destroy_finder(finder_id)
+
+    def _create_finder(self) -> str:
         params = {"action": "factory.create"}
         response = self._get("/cgi-bin/mediaFileFind.cgi", params=params)
 
@@ -55,7 +73,7 @@ class AmcrestClient:
         if not object_id:
             raise RuntimeError("Failed to create media file finder")
 
-        return self._fetch_recordings(object_id, start_str, end_str, channel)
+        return object_id
 
     def _parse_object_id(self, response_text: str) -> Optional[str]:
         for line in response_text.splitlines():
@@ -71,12 +89,12 @@ class AmcrestClient:
         self._close_finder(object_id)
         return recordings
 
-    def _initiate_search(
-        self, object_id: str, start_time: str, end_time: str, channel: int
+    def _start_search(
+        self, finder_id: str, start_time: str, end_time: str, channel: int
     ) -> None:
         params = {
             "action": "findFile",
-            "object": object_id,
+            "object": finder_id,
             "condition.Channel": channel,
             "condition.StartTime": start_time,
             "condition.EndTime": end_time,
@@ -84,17 +102,17 @@ class AmcrestClient:
         response = self._get(
             "/cgi-bin/mediaFileFind.cgi", params=params, timeout=self.SEARCH_TIMEOUT
         )
-        self._validate_search_response(response.text, object_id)
+        self._validate_search_response(response.text, finder_id)
 
-    def _validate_search_response(self, response_text: str, object_id: str) -> None:
+    def _validate_search_response(self, response_text: str, finder_id: str) -> None:
         if "ok" not in response_text.lower():
-            self._close_finder(object_id)
+            self._destroy_finder(finder_id)
             raise RuntimeError(f"Search failed: {response_text}")
 
-    def _collect_all_batches(self, object_id: str) -> list[Recording]:
+    def _retrieve_all_results(self, finder_id: str) -> list[Recording]:
         recordings = []
         while True:
-            next_response = self._fetch_next_batch(object_id)
+            next_response = self._fetch_next_batch(finder_id)
             if not next_response:
                 break
 
@@ -105,10 +123,10 @@ class AmcrestClient:
             recordings.extend(batch_recordings)
         return recordings
 
-    def _fetch_next_batch(self, object_id: str) -> str:
+    def _fetch_next_batch(self, finder_id: str) -> str:
         params = {
             "action": "findNextFile",
-            "object": object_id,
+            "object": finder_id,
             "count": self.BATCH_SIZE,
         }
         response = self._get(
@@ -196,10 +214,10 @@ class AmcrestClient:
             channel=channel,
         )
 
-    def _close_finder(self, object_id: str):
+    def _destroy_finder(self, finder_id: str):
         params = {
             "action": "destroy",
-            "object": object_id,
+            "object": finder_id,
         }
         try:
             self._get("/cgi-bin/mediaFileFind.cgi", params=params)
