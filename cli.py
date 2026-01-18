@@ -60,72 +60,134 @@ class CLI:
 
     def run(self, args: list[str] = None) -> int:
         parsed_args = self._parser.parse_args(args)
-        password = getpass.getpass("Password: ")
-        try:
-            time_range = TimeRange.from_iso8601(parsed_args.start, parsed_args.end)
-        except ValueError as e:
-            print(f"Error: Invalid date format: {e}", file=sys.stderr)
-            return 1
 
-        client = None
         try:
-            client = AmcrestClient(parsed_args.host, parsed_args.username, password)
+            password = self._get_password()
+            time_range = self._parse_time_range(parsed_args.start, parsed_args.end)
 
-            print(
-                f"Searching for recordings from {parsed_args.start} to {parsed_args.end}..."
+            client = self._create_client(
+                parsed_args.host, parsed_args.username, password
             )
-            recordings = client.find_recordings(time_range, parsed_args.channel)
-            if not recordings:
-                print("No recordings found in the specified time range.")
+            try:
+                recordings = self._search_recordings(
+                    client, time_range, parsed_args.channel
+                )
+                if not recordings:
+                    return 0
+
+                downloaded_files = self._download_recordings(
+                    client,
+                    recordings,
+                    parsed_args.output_dir,
+                    parsed_args.max_concurrent,
+                )
+                if not downloaded_files:
+                    return 1
+
+                output_file = self._determine_output_file(
+                    parsed_args.output_file,
+                    parsed_args.output_dir,
+                    parsed_args.output_format,
+                    time_range,
+                )
+                if not self._merge_recordings(
+                    downloaded_files,
+                    output_file,
+                    parsed_args.output_format,
+                    parsed_args.keep_files,
+                ):
+                    return 1
+
+                self._cleanup_work_dir(parsed_args.output_dir, parsed_args.keep_files)
                 return 0
 
-            print(f"Found {len(recordings)} recording(s)")
-            downloader = RecordingDownloader(client, parsed_args.max_concurrent)
-            work_dir = parsed_args.output_dir / ".amcrest_download"
-
-            print("Downloading recordings...")
-            downloaded_files = downloader.download_all(
-                recordings, work_dir, progress_callback=self._print_progress
-            )
-            if not downloaded_files:
-                print("No files were downloaded successfully.")
-                return 1
-
-            print(f"\nMerging {len(downloaded_files)} file(s)...")
-            output_file = self._determine_output_file(
-                parsed_args.output_file,
-                parsed_args.output_dir,
-                parsed_args.output_format,
-                time_range,
-            )
-            merger = VideoMerger(parsed_args.output_format)
-            success = merger.merge(
-                downloaded_files, output_file, cleanup=not parsed_args.keep_files
-            )
-
-            if success:
-                print(f"Successfully created: {output_file}")
-
-                if not parsed_args.keep_files:
-                    try:
-                        work_dir.rmdir()
-                    except Exception:
-                        pass
-
-                return 0
-            else:
-                print("Merge failed.", file=sys.stderr)
-                return 1
+            finally:
+                client.close()
 
         except KeyboardInterrupt:
             print("\nOperation cancelled by user.")
             return 130
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr)
             return 1
-        finally:
-            if client:
-                client.close()
+
+    def _get_password(self) -> str:
+        return getpass.getpass("Password: ")
+
+    def _parse_time_range(self, start_str: str, end_str: str) -> TimeRange:
+        try:
+            return TimeRange.from_iso8601(start_str, end_str)
+        except ValueError as e:
+            raise ValueError(f"Invalid date format: {e}")
+
+    def _create_client(self, host: str, username: str, password: str) -> AmcrestClient:
+        return AmcrestClient(host, username, password)
+
+    def _search_recordings(
+        self, client: AmcrestClient, time_range: TimeRange, channel: int
+    ) -> list:
+        start_str = time_range.start.isoformat()
+        end_str = time_range.end.isoformat()
+        print(f"Searching for recordings from {start_str} to {end_str}...")
+
+        recordings = client.find_recordings(time_range, channel)
+
+        if not recordings:
+            print("No recordings found in the specified time range.")
+        else:
+            print(f"Found {len(recordings)} recording(s)")
+
+        return recordings
+
+    def _download_recordings(
+        self,
+        client: AmcrestClient,
+        recordings: list,
+        output_dir: Path,
+        max_concurrent: int,
+    ) -> list[Path]:
+        downloader = RecordingDownloader(client, max_concurrent)
+        work_dir = output_dir / ".amcrest_download"
+
+        print("Downloading recordings...")
+        downloaded_files = downloader.download_all(
+            recordings, work_dir, progress_callback=self._print_progress
+        )
+
+        if not downloaded_files:
+            print("No files were downloaded successfully.")
+
+        return downloaded_files
+
+    def _merge_recordings(
+        self,
+        downloaded_files: list[Path],
+        output_file: Path,
+        output_format: str,
+        keep_files: bool,
+    ) -> bool:
+        print(f"\nMerging {len(downloaded_files)} file(s)...")
+
+        merger = VideoMerger(output_format)
+        success = merger.merge(downloaded_files, output_file, cleanup=not keep_files)
+
+        if success:
+            print(f"Successfully created: {output_file}")
+        else:
+            print("Merge failed.", file=sys.stderr)
+
+        return success
+
+    def _cleanup_work_dir(self, output_dir: Path, keep_files: bool):
+        if not keep_files:
+            work_dir = output_dir / ".amcrest_download"
+            try:
+                work_dir.rmdir()
+            except Exception:
+                pass
 
     def _print_progress(self, completed: int, total: int):
         percent = (completed / total) * 100
