@@ -161,12 +161,9 @@ class AmcrestClient:
                 continue
 
             if line.startswith("items[") and self._is_complete_recording(current_file):
-                try:
-                    recording = self._create_recording(current_file)
-                    if self._should_include_recording(recording):
-                        recordings.append(recording)
-                except Exception:
-                    pass
+                recording = self._try_create_recording(current_file)
+                if recording:
+                    recordings.append(recording)
                 current_file = {}
 
             key, value = self._parse_recording_line(line)
@@ -174,14 +171,20 @@ class AmcrestClient:
                 current_file[key] = value
 
         if self._is_complete_recording(current_file):
-            try:
-                recording = self._create_recording(current_file)
-                if self._should_include_recording(recording):
-                    recordings.append(recording)
-            except Exception:
-                pass
+            recording = self._try_create_recording(current_file)
+            if recording:
+                recordings.append(recording)
 
         return recordings
+
+    def _try_create_recording(self, file_data: dict) -> Optional[Recording]:
+        try:
+            recording = self._create_recording(file_data)
+            if self._should_include_recording(recording):
+                return recording
+        except Exception:
+            pass
+        return None
 
     def _parse_recording_line(self, line: str) -> tuple[Optional[str], Optional[str]]:
         if ".FilePath=" in line:
