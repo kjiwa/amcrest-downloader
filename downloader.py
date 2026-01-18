@@ -7,6 +7,8 @@ from models import Recording
 
 
 class RecordingDownloader:
+    DEFAULT_MAX_RETRIES = 3
+
     def __init__(self, client: AmcrestClient, max_concurrent: int = 4):
         self._client = client
         self._max_concurrent = max_concurrent
@@ -21,41 +23,55 @@ class RecordingDownloader:
             return []
 
         output_dir.mkdir(parents=True, exist_ok=True)
+
+        futures = self._submit_download_tasks(recordings, output_dir)
+        downloaded_files = self._await_completion(futures, progress_callback)
+
+        return sorted(downloaded_files)
+
+    def _submit_download_tasks(
+        self, recordings: list[Recording], output_dir: Path
+    ) -> dict:
+        executor = ThreadPoolExecutor(max_workers=self._max_concurrent)
+        futures = {}
+
+        for idx, recording in enumerate(recordings):
+            output_file = self._generate_filename(recording, output_dir, idx)
+            future = executor.submit(self._download_with_retry, recording, output_file)
+            futures[future] = (recording, output_file, executor)
+
+        return futures
+
+    def _await_completion(
+        self, futures: dict, progress_callback: Callable[[int, int], None]
+    ) -> list[Path]:
         downloaded_files = []
+        completed = 0
+        total = len(futures)
+        executor = None
 
-        with ThreadPoolExecutor(max_workers=self._max_concurrent) as executor:
-            futures = {}
-
-            for idx, recording in enumerate(recordings):
-                output_file = self._generate_filename(recording, output_dir, idx)
-                future = executor.submit(
-                    self._download_with_retry, recording, output_file
-                )
-                futures[future] = (recording, output_file)
-
-            completed = 0
-            total = len(recordings)
-
+        try:
             for future in as_completed(futures):
-                recording, output_file = futures[future]
+                recording, output_file, executor = futures[future]
 
                 try:
-                    success = future.result()
+                    success = self._handle_download_result(future)
                     if success:
                         downloaded_files.append(output_file)
-                    completed += 1
-
-                    if progress_callback:
-                        progress_callback(completed, total)
-
                 except Exception:
-                    completed += 1
+                    pass
 
-                    if progress_callback:
-                        progress_callback(completed, total)
+                completed += 1
+                if progress_callback:
+                    progress_callback(completed, total)
+        finally:
+            if executor:
+                executor.shutdown(wait=True)
 
-        downloaded_files.sort()
         return downloaded_files
+
+    def _handle_download_result(self, future) -> bool:
+        return future.result()
 
     def _generate_filename(
         self, recording: Recording, output_dir: Path, index: int
@@ -63,14 +79,12 @@ class RecordingDownloader:
         timestamp = recording.start_time.strftime("%Y%m%d_%H%M%S")
         return output_dir / f"recording_{index:04d}_{timestamp}.mp4"
 
-    def _download_with_retry(
-        self, recording: Recording, output_path: Path, max_retries: int = 3
-    ) -> bool:
-        for attempt in range(max_retries):
+    def _download_with_retry(self, recording: Recording, output_path: Path) -> bool:
+        for attempt in range(self.DEFAULT_MAX_RETRIES):
             try:
                 return self._client.download_recording(recording, output_path)
             except Exception:
-                if attempt == max_retries - 1:
+                if attempt == self.DEFAULT_MAX_RETRIES - 1:
                     raise
 
         return False
