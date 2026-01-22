@@ -4,6 +4,7 @@ from typing import Callable
 
 from amcrest_api import AmcrestClient
 from models import Recording
+from logger import get_logger
 
 
 class RecordingDownloader:
@@ -12,6 +13,7 @@ class RecordingDownloader:
     def __init__(self, client: AmcrestClient, max_concurrent: int = 4):
         self._client = client
         self._max_concurrent = max_concurrent
+        self._logger = get_logger(__name__)
 
     def download_all(
         self,
@@ -22,12 +24,18 @@ class RecordingDownloader:
         if not recordings:
             return []
 
+        self._logger.info(
+            f"Starting download of {len(recordings)} recordings to {output_dir}"
+        )
         output_dir.mkdir(parents=True, exist_ok=True)
 
         with ThreadPoolExecutor(max_workers=self._max_concurrent) as executor:
             futures = self._submit_download_tasks(recordings, output_dir, executor)
             downloaded_files = self._await_completion(futures, progress_callback)
 
+        self._logger.info(
+            f"Download completed: {len(downloaded_files)}/{len(recordings)} files successful"
+        )
         return sorted(downloaded_files)
 
     def _submit_download_tasks(
@@ -36,6 +44,9 @@ class RecordingDownloader:
         output_dir: Path,
         executor: ThreadPoolExecutor,
     ) -> dict:
+        self._logger.debug(
+            f"Submitting {len(recordings)} download tasks with {self._max_concurrent} workers"
+        )
         futures = {}
 
         for idx, recording in enumerate(recordings):
@@ -59,8 +70,8 @@ class RecordingDownloader:
                 success = self._handle_download_result(future)
                 if success:
                     downloaded_files.append(output_file)
-            except Exception:
-                pass
+            except Exception as e:
+                self._logger.warning(f"Download failed for {recording.file_path}: {e}")
 
             completed += 1
             if progress_callback:
@@ -78,11 +89,23 @@ class RecordingDownloader:
         return output_dir / f"recording_{index:04d}_{timestamp}.mp4"
 
     def _download_with_retry(self, recording: Recording, output_path: Path) -> bool:
+        last_exception = None
+
         for attempt in range(self.DEFAULT_MAX_RETRIES):
             try:
                 return self._client.download_recording(recording, output_path)
-            except Exception:
+            except Exception as e:
+                last_exception = e
+                if attempt < self.DEFAULT_MAX_RETRIES - 1:
+                    self._logger.warning(
+                        f"Download attempt {attempt + 1}/{self.DEFAULT_MAX_RETRIES} failed for "
+                        f"{recording.file_path}: {e}. Retrying..."
+                    )
                 if attempt == self.DEFAULT_MAX_RETRIES - 1:
+                    self._logger.error(
+                        f"Download failed after {self.DEFAULT_MAX_RETRIES} attempts for "
+                        f"{recording.file_path}: {last_exception}"
+                    )
                     raise
 
         return False

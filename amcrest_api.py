@@ -6,18 +6,10 @@ import requests
 from requests.auth import HTTPDigestAuth
 
 from models import Recording, TimeRange
+from logger import get_logger
 
 
 class AmcrestClient:
-    """Client for interacting with Amcrest camera API.
-
-    Recording search follows a 4-step protocol:
-    1. Create a media file finder (factory.create)
-    2. Start the search (findFile)
-    3. Retrieve results in batches (findNextFile)
-    4. Destroy the finder (destroy)
-    """
-
     DEFAULT_TIMEOUT = 10
     SEARCH_TIMEOUT = 30
     DOWNLOAD_TIMEOUT = 60
@@ -29,6 +21,7 @@ class AmcrestClient:
         self._auth = HTTPDigestAuth(username, password)
         self._session = requests.Session()
         self._session.auth = self._auth
+        self._logger = get_logger(__name__)
 
     def _build_url(self, endpoint: str, params: dict = None) -> str:
         if not endpoint.startswith("/"):
@@ -66,13 +59,18 @@ class AmcrestClient:
             self._destroy_finder(finder_id)
 
     def _create_finder(self) -> str:
+        self._logger.debug("Creating media file finder")
         params = {"action": "factory.create"}
         response = self._get("/cgi-bin/mediaFileFind.cgi", params=params)
 
         object_id = self._parse_object_id(response.text)
         if not object_id:
+            self._logger.error(
+                "Failed to create media file finder: no object ID returned"
+            )
             raise RuntimeError("Failed to create media file finder")
 
+        self._logger.debug(f"Created finder with ID: {object_id}")
         return object_id
 
     def _parse_object_id(self, response_text: str) -> Optional[str]:
@@ -92,6 +90,9 @@ class AmcrestClient:
     def _start_search(
         self, finder_id: str, start_time: str, end_time: str, channel: int
     ) -> None:
+        self._logger.info(
+            f"Starting search: channel={channel}, start={start_time}, end={end_time}"
+        )
         params = {
             "action": "findFile",
             "object": finder_id,
@@ -106,11 +107,14 @@ class AmcrestClient:
 
     def _validate_search_response(self, response_text: str, finder_id: str) -> None:
         if "ok" not in response_text.lower():
+            self._logger.error(f"Search validation failed: {response_text}")
             self._destroy_finder(finder_id)
             raise RuntimeError(f"Search failed: {response_text}")
 
     def _retrieve_all_results(self, finder_id: str) -> list[Recording]:
         recordings = []
+        batch_num = 0
+
         while True:
             next_response = self._fetch_next_batch(finder_id)
             if not next_response:
@@ -120,7 +124,15 @@ class AmcrestClient:
             if not batch_recordings:
                 break
 
+            batch_num += 1
+            self._logger.debug(
+                f"Retrieved batch {batch_num} with {len(batch_recordings)} recordings"
+            )
             recordings.extend(batch_recordings)
+
+        self._logger.info(
+            f"Search completed: found {len(recordings)} recordings in {batch_num} batches"
+        )
         return recordings
 
     def _fetch_next_batch(self, finder_id: str) -> str:
@@ -175,6 +187,7 @@ class AmcrestClient:
             if recording:
                 recordings.append(recording)
 
+        self._logger.debug(f"Parsed {len(recordings)} recordings from batch")
         return recordings
 
     def _try_create_recording(self, file_data: dict) -> Optional[Recording]:
@@ -182,8 +195,10 @@ class AmcrestClient:
             recording = self._create_recording(file_data)
             if self._should_include_recording(recording):
                 return recording
-        except Exception:
-            pass
+        except Exception as e:
+            self._logger.warning(
+                f"Failed to create recording from data {file_data}: {e}"
+            )
         return None
 
     def _parse_recording_line(self, line: str) -> tuple[Optional[str], Optional[str]]:
@@ -218,16 +233,19 @@ class AmcrestClient:
         )
 
     def _destroy_finder(self, finder_id: str):
+        self._logger.debug(f"Destroying finder with ID: {finder_id}")
         params = {
             "action": "destroy",
             "object": finder_id,
         }
         try:
             self._get("/cgi-bin/mediaFileFind.cgi", params=params)
-        except Exception:
-            pass
+            self._logger.debug(f"Successfully destroyed finder {finder_id}")
+        except Exception as e:
+            self._logger.warning(f"Failed to destroy finder {finder_id}: {e}")
 
     def download_recording(self, recording: Recording, output_path: Path) -> bool:
+        self._logger.debug(f"Starting download: {recording.file_path} -> {output_path}")
         file_path = str(recording.file_path)
         endpoint = f"/cgi-bin/RPC_Loadfile{file_path}"
         url = self._build_url(endpoint)
@@ -245,8 +263,10 @@ class AmcrestClient:
                     if chunk:
                         f.write(chunk)
 
+            self._logger.info(f"Successfully downloaded: {output_path.name}")
             return True
         except Exception as e:
+            self._logger.error(f"Download failed for {recording.file_path}: {e}")
             if output_path.exists():
                 output_path.unlink()
             raise RuntimeError(f"Failed to download recording: {e}")

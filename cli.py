@@ -7,11 +7,13 @@ from amcrest_api import AmcrestClient
 from downloader import RecordingDownloader
 from merger import VideoMerger
 from models import TimeRange
+from logger import configure_logging, get_logger
 
 
 class CLI:
     def __init__(self):
         self._parser = self._create_parser()
+        self._logger = get_logger(__name__)
 
     def _create_parser(self) -> argparse.ArgumentParser:
         parser = argparse.ArgumentParser(
@@ -56,12 +58,29 @@ class CLI:
         parser.add_argument(
             "--channel", type=int, default=1, help="Camera channel (default: 1)"
         )
+        parser.add_argument(
+            "--log-level",
+            choices=["debug", "info", "warning", "error", "critical"],
+            default="warning",
+            help="Set logging verbosity (default: warning)",
+        )
+        parser.add_argument(
+            "--log-file",
+            type=Path,
+            help="Write logs to file instead of console",
+        )
         return parser
 
     def run(self, args: list[str] = None) -> int:
         parsed_args = self._parser.parse_args(args)
 
+        configure_logging(
+            level=parsed_args.log_level,
+            log_file=parsed_args.log_file,
+        )
+
         try:
+            self._logger.info("Starting Amcrest recording download and merge")
             password = self._get_password()
             time_range = self._parse_time_range(parsed_args.start, parsed_args.end)
 
@@ -73,6 +92,7 @@ class CLI:
                     client, time_range, parsed_args.channel
                 )
                 if not recordings:
+                    self._logger.info("No recordings found, exiting")
                     return 0
 
                 downloaded_files = self._download_recordings(
@@ -82,6 +102,7 @@ class CLI:
                     parsed_args.max_concurrent,
                 )
                 if not downloaded_files:
+                    self._logger.error("No files were downloaded successfully")
                     return 1
 
                 output_file = self._determine_output_file(
@@ -101,18 +122,22 @@ class CLI:
 
                 self._cleanup_work_dir(parsed_args.output_dir, parsed_args.keep_files)
                 print(f"Successfully created: {output_file}")
+                self._logger.info(f"Operation completed successfully: {output_file}")
                 return 0
 
             finally:
                 client.close()
 
         except KeyboardInterrupt:
+            self._logger.warning("Operation cancelled by user")
             print("\nOperation cancelled by user.")
             return 130
         except ValueError as e:
+            self._logger.error(f"Validation error: {e}")
             print(f"Error: {e}", file=sys.stderr)
             return 1
         except Exception as e:
+            self._logger.error(f"Unexpected error: {e}", exc_info=True)
             print(f"Error: {e}", file=sys.stderr)
             return 1
 
@@ -133,6 +158,9 @@ class CLI:
     ) -> list:
         start_str = time_range.start.isoformat()
         end_str = time_range.end.isoformat()
+        self._logger.info(
+            f"Searching for recordings: channel={channel}, start={start_str}, end={end_str}"
+        )
         print(f"Searching for recordings from {start_str} to {end_str}...")
 
         recordings = client.find_recordings(time_range, channel)
@@ -154,6 +182,9 @@ class CLI:
         downloader = RecordingDownloader(client, max_concurrent)
         work_dir = output_dir / ".amcrest_download"
 
+        self._logger.info(
+            f"Starting download: {len(recordings)} recordings, max_concurrent={max_concurrent}"
+        )
         print("Downloading recordings...")
         downloaded_files = downloader.download_all(
             recordings, work_dir, progress_callback=self._print_progress
@@ -161,6 +192,10 @@ class CLI:
 
         if not downloaded_files:
             print("No files were downloaded successfully.")
+        else:
+            self._logger.info(
+                f"Download phase completed: {len(downloaded_files)} files"
+            )
 
         return downloaded_files
 
@@ -171,6 +206,9 @@ class CLI:
         output_format: str,
         keep_files: bool,
     ) -> bool:
+        self._logger.info(
+            f"Starting merge: {len(downloaded_files)} files -> {output_file}"
+        )
         print(f"\nMerging {len(downloaded_files)} file(s)...")
 
         merger = VideoMerger(output_format)
@@ -184,10 +222,12 @@ class CLI:
     def _cleanup_work_dir(self, output_dir: Path, keep_files: bool):
         if not keep_files:
             work_dir = output_dir / ".amcrest_download"
+            self._logger.debug(f"Cleaning up work directory: {work_dir}")
             try:
                 work_dir.rmdir()
-            except Exception:
-                pass
+                self._logger.debug("Work directory removed successfully")
+            except Exception as e:
+                self._logger.warning(f"Could not remove work directory {work_dir}: {e}")
 
     def _print_progress(self, completed: int, total: int):
         percent = (completed / total) * 100
