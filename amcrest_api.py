@@ -1,12 +1,14 @@
+import re
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from datetime import datetime
-from urllib.parse import urlencode, quote
+from urllib.parse import quote, urlencode, urlsplit
 import requests
+from requests.adapters import HTTPAdapter
 from requests.auth import HTTPDigestAuth
 
-from models import Recording, TimeRange
 from logger import get_logger
+from models import Recording, TimeRange
 
 
 class AmcrestClient:
@@ -15,20 +17,66 @@ class AmcrestClient:
     DOWNLOAD_TIMEOUT = 60
     BATCH_SIZE = 100
     CHUNK_SIZE = 8192
+    SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".dav", ".mkv", ".avi", ".asf", ".264"}
 
-    def __init__(self, host: str, username: str, password: str):
-        self._host = host.rstrip("/")
+    def __init__(
+        self,
+        host: str,
+        username: str,
+        password: str,
+        port: Optional[int] = None,
+        ssl: bool = False,
+        verify_ssl: bool = True,
+        max_connections: int = 10,
+    ):
+        self._base_url = self._format_base_url(host, port, ssl)
         self._auth = HTTPDigestAuth(username, password)
+        self._verify_ssl = verify_ssl
         self._session = requests.Session()
         self._session.auth = self._auth
+        self._session.verify = verify_ssl
+
+        adapter = HTTPAdapter(
+            pool_connections=max_connections,
+            pool_maxsize=max_connections,
+        )
+        self._session.mount("http://", adapter)
+        self._session.mount("https://", adapter)
+
         self._logger = get_logger(__name__)
 
-    def _build_url(self, endpoint: str, params: dict = None) -> str:
+    def __enter__(self) -> "AmcrestClient":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
+
+    def _format_base_url(self, host: str, port: Optional[int], ssl: bool) -> str:
+        clean_host = host.strip()
+        if clean_host.startswith(("http://", "https://")):
+            parsed = urlsplit(clean_host)
+            scheme = parsed.scheme
+            hostname = parsed.hostname or ""
+            target_port = port if port is not None else parsed.port
+        else:
+            scheme = "https" if ssl else "http"
+            if ":" in clean_host:
+                parts = clean_host.split(":", 1)
+                hostname = parts[0]
+                target_port = port if port is not None else int(parts[1])
+            else:
+                hostname = clean_host
+                target_port = port
+
+        if target_port:
+            return f"{scheme}://{hostname}:{target_port}"
+        return f"{scheme}://{hostname}"
+
+    def _build_url(self, endpoint: str, params: Optional[dict] = None) -> str:
         if not endpoint.startswith("/"):
             endpoint = f"/{endpoint}"
 
-        url = f"http://{self._host}{endpoint}"
-
+        url = f"{self._base_url}{endpoint}"
         if params:
             encoded_params = urlencode(params, quote_via=quote, safe="")
             url = f"{url}?{encoded_params}"
@@ -36,7 +84,10 @@ class AmcrestClient:
         return url
 
     def _get(
-        self, endpoint: str, params: dict = None, timeout: int = None
+        self,
+        endpoint: str,
+        params: Optional[dict] = None,
+        timeout: Optional[int] = None,
     ) -> requests.Response:
         if timeout is None:
             timeout = self.DEFAULT_TIMEOUT
@@ -49,12 +100,10 @@ class AmcrestClient:
         self, time_range: TimeRange, channel: int = 0
     ) -> list[Recording]:
         start_str, end_str = time_range.to_amcrest_format()
-
         finder_id = self._create_finder()
         try:
             self._start_search(finder_id, start_str, end_str, channel)
-            recordings = self._retrieve_all_results(finder_id)
-            return recordings
+            return self._retrieve_all_results(finder_id)
         finally:
             self._destroy_finder(finder_id)
 
@@ -75,17 +124,10 @@ class AmcrestClient:
 
     def _parse_object_id(self, response_text: str) -> Optional[str]:
         for line in response_text.splitlines():
+            line = line.strip()
             if line.startswith("result="):
                 return line.split("=", 1)[1].strip()
         return None
-
-    def _fetch_recordings(
-        self, object_id: str, start_time: str, end_time: str, channel: int
-    ) -> list[Recording]:
-        self._initiate_search(object_id, start_time, end_time, channel)
-        recordings = self._collect_all_batches(object_id)
-        self._close_finder(object_id)
-        return recordings
 
     def _start_search(
         self, finder_id: str, start_time: str, end_time: str, channel: int
@@ -103,39 +145,36 @@ class AmcrestClient:
         response = self._get(
             "/cgi-bin/mediaFileFind.cgi", params=params, timeout=self.SEARCH_TIMEOUT
         )
-        self._validate_search_response(response.text, finder_id)
+        self._validate_search_response(response.text)
 
-    def _validate_search_response(self, response_text: str, finder_id: str) -> None:
+    def _validate_search_response(self, response_text: str) -> None:
         if "ok" not in response_text.lower():
             self._logger.error(f"Search validation failed: {response_text}")
-            self._destroy_finder(finder_id)
             raise RuntimeError(f"Search failed: {response_text}")
 
+
     def _retrieve_all_results(self, finder_id: str) -> list[Recording]:
-        recordings = []
+        recordings: list[Recording] = []
         batch_num = 0
 
         while True:
-            next_response = self._fetch_next_batch(finder_id)
-            if not next_response:
-                break
-
-            batch_recordings = self._parse_recordings(next_response)
-            if not batch_recordings:
+            batch_text, file_count = self._fetch_next_batch(finder_id)
+            if file_count == 0 or not batch_text:
                 break
 
             batch_num += 1
+            batch_recordings = self._parse_recordings(batch_text)
             self._logger.debug(
-                f"Retrieved batch {batch_num} with {len(batch_recordings)} recordings"
+                f"Retrieved batch {batch_num} ({file_count} raw items, {len(batch_recordings)} video recordings)"
             )
             recordings.extend(batch_recordings)
 
         self._logger.info(
-            f"Search completed: found {len(recordings)} recordings in {batch_num} batches"
+            f"Search completed: found {len(recordings)} recordings across {batch_num} batches"
         )
         return recordings
 
-    def _fetch_next_batch(self, finder_id: str) -> str:
+    def _fetch_next_batch(self, finder_id: str) -> tuple[str, int]:
         params = {
             "action": "findNextFile",
             "object": finder_id,
@@ -145,94 +184,71 @@ class AmcrestClient:
             "/cgi-bin/mediaFileFind.cgi", params=params, timeout=self.SEARCH_TIMEOUT
         )
 
-        lines = response.text.split("\n", 1)
+        lines = response.text.splitlines()
         if not lines:
-            return ""
+            return "", 0
 
         first_line = lines[0].strip()
         if not first_line.startswith("found="):
-            return ""
+            return "", 0
 
-        count_str = first_line.split("=", 1)[1]
+        count_str = first_line.split("=", 1)[1].strip()
         try:
-            file_count = int(count_str)
-            if file_count == 0:
-                return ""
+            return response.text, int(count_str)
         except ValueError:
-            return ""
-
-        return response.text
+            return "", 0
 
     def _parse_recordings(self, response_text: str) -> list[Recording]:
-        recordings = []
-        current_file = {}
+        item_pattern = re.compile(r"^items\[(\d+)\]\.(.+?)=(.*)$")
+        raw_items: dict[int, dict[str, str]] = {}
 
         for line in response_text.splitlines():
-            line = line.strip()
-            if not line or line.startswith("found="):
+            match = item_pattern.match(line.strip())
+            if not match:
                 continue
+            idx = int(match.group(1))
+            key = match.group(2)
+            val = match.group(3)
+            if idx not in raw_items:
+                raw_items[idx] = {}
+            raw_items[idx][key] = val
 
-            if line.startswith("items[") and self._is_complete_recording(current_file):
-                recording = self._try_create_recording(current_file)
-                if recording:
-                    recordings.append(recording)
-                current_file = {}
-
-            key, value = self._parse_recording_line(line)
-            if key:
-                current_file[key] = value
-
-        if self._is_complete_recording(current_file):
-            recording = self._try_create_recording(current_file)
+        recordings: list[Recording] = []
+        for idx in sorted(raw_items.keys()):
+            recording = self._create_recording(raw_items[idx])
             if recording:
                 recordings.append(recording)
 
-        self._logger.debug(f"Parsed {len(recordings)} recordings from batch")
         return recordings
 
-    def _try_create_recording(self, file_data: dict) -> Optional[Recording]:
-        try:
-            recording = self._create_recording(file_data)
-            if self._should_include_recording(recording):
-                return recording
-        except Exception as e:
-            self._logger.warning(
-                f"Failed to create recording from data {file_data}: {e}"
-            )
-        return None
-
-    def _parse_recording_line(self, line: str) -> tuple[Optional[str], Optional[str]]:
-        if ".FilePath=" in line:
-            return "FilePath", line.split("=", 1)[1]
-        elif ".StartTime=" in line:
-            return "StartTime", line.split("=", 1)[1]
-        elif ".EndTime=" in line:
-            return "EndTime", line.split("=", 1)[1]
-        elif ".Channel=" in line:
-            return "Channel", int(line.split("=", 1)[1])
-        return None, None
-
-    def _is_complete_recording(self, file_data: dict) -> bool:
-        return "FilePath" in file_data and "StartTime" in file_data
-
-    def _should_include_recording(self, recording: Recording) -> bool:
-        return ".mp4" in str(recording.file_path)
-
-    def _create_recording(self, file_data: dict) -> Recording:
-        start_time = datetime.strptime(file_data["StartTime"], "%Y-%m-%d %H:%M:%S")
-        end_time = datetime.strptime(file_data["EndTime"], "%Y-%m-%d %H:%M:%S")
+    def _create_recording(self, file_data: dict[str, str]) -> Optional[Recording]:
+        if "FilePath" not in file_data or "StartTime" not in file_data or "EndTime" not in file_data:
+            return None
 
         file_path = Path(file_data["FilePath"])
-        channel = file_data.get("Channel", 0)
+        if file_path.suffix.lower() not in self.SUPPORTED_VIDEO_EXTENSIONS:
+            return None
 
-        return Recording(
-            start_time=start_time,
-            end_time=end_time,
-            file_path=file_path,
-            channel=channel,
-        )
+        try:
+            start_time = datetime.strptime(file_data["StartTime"], "%Y-%m-%d %H:%M:%S")
+            end_time = datetime.strptime(file_data["EndTime"], "%Y-%m-%d %H:%M:%S")
+            file_size = int(file_data.get("Length", 0))
+            channel = int(file_data.get("Channel", 0))
 
-    def _destroy_finder(self, finder_id: str):
+            return Recording(
+                start_time=start_time,
+                end_time=end_time,
+                file_path=file_path,
+                file_size=file_size,
+                channel=channel,
+            )
+        except Exception as e:
+            self._logger.warning(
+                f"Failed to parse recording item {file_data}: {e}"
+            )
+            return None
+
+    def _destroy_finder(self, finder_id: str) -> None:
         self._logger.debug(f"Destroying finder with ID: {finder_id}")
         params = {
             "action": "destroy",
@@ -246,30 +262,32 @@ class AmcrestClient:
 
     def download_recording(self, recording: Recording, output_path: Path) -> bool:
         self._logger.debug(f"Starting download: {recording.file_path} -> {output_path}")
-        file_path = str(recording.file_path)
-        endpoint = f"/cgi-bin/RPC_Loadfile{file_path}"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        part_path = output_path.with_name(f"{output_path.name}.part")
+
+        endpoint = f"/cgi-bin/RPC_Loadfile{str(recording.file_path)}"
         url = self._build_url(endpoint)
 
         try:
-            response = self._session.get(
-                url, stream=True, timeout=self.DOWNLOAD_TIMEOUT
-            )
-            response.raise_for_status()
-
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-
-            with open(output_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=self.CHUNK_SIZE):
-                    if chunk:
-                        f.write(chunk)
-
+            self._stream_to_file(url, part_path)
+            part_path.replace(output_path)
             self._logger.info(f"Successfully downloaded: {output_path.name}")
             return True
         except Exception as e:
+            if part_path.exists():
+                part_path.unlink()
             self._logger.error(f"Download failed for {recording.file_path}: {e}")
-            if output_path.exists():
-                output_path.unlink()
             raise RuntimeError(f"Failed to download recording: {e}")
 
-    def close(self):
+    def _stream_to_file(self, url: str, local_path: Path) -> None:
+        response = self._session.get(url, stream=True, timeout=self.DOWNLOAD_TIMEOUT)
+        response.raise_for_status()
+
+        with open(local_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=self.CHUNK_SIZE):
+                if chunk:
+                    f.write(chunk)
+
+    def close(self) -> None:
         self._session.close()
+

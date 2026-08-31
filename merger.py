@@ -5,12 +5,12 @@ from logger import get_logger
 
 
 class VideoMerger:
-    SUPPORTED_FORMATS = {"mp4", "mkv", "avi"}
+    SUPPORTED_FORMATS = {"mp4", "mkv", "avi", "mov", "ts"}
 
     def __init__(self, output_format: str = "mp4"):
-        if output_format not in self.SUPPORTED_FORMATS:
+        if output_format.lower() not in self.SUPPORTED_FORMATS:
             raise ValueError(f"Unsupported format: {output_format}")
-        self._output_format = output_format
+        self._output_format = output_format.lower()
         self._logger = get_logger(__name__)
 
     def merge(
@@ -22,35 +22,44 @@ class VideoMerger:
         self._logger.info(
             f"Starting merge of {len(input_files)} files to {output_file}"
         )
+        self._prepare_output_file(output_file)
         concat_file = self._create_concat_file(input_files)
+
         try:
             success = self._execute_ffmpeg(concat_file, output_file)
             if success:
                 self._logger.info(f"Merge completed successfully: {output_file}")
                 if cleanup:
-                    self._cleanup_files(input_files, concat_file)
+                    self._cleanup_files(input_files)
             else:
                 self._logger.error(f"Merge failed for {output_file}")
-                if not cleanup:
-                    concat_file.unlink()
-
-            if not cleanup and success:
-                concat_file.unlink()
 
             return success
 
         except Exception as e:
             self._logger.error(f"Merge error: {e}")
-            concat_file.unlink()
-            raise RuntimeError(f"Merge failed: {e}")
+            raise
+        finally:
+            if concat_file.exists():
+                try:
+                    concat_file.unlink()
+                except Exception as e:
+                    self._logger.warning(f"Could not delete concat file {concat_file}: {e}")
+
+    def _prepare_output_file(self, output_file: Path) -> None:
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    def _escape_path(self, path: Path) -> str:
+        abs_str = str(path.resolve())
+        return abs_str.replace("'", "'\\''")
 
     def _create_concat_file(self, input_files: list[Path]) -> Path:
         concat_file = input_files[0].parent / "concat_list.txt"
         self._logger.debug(f"Creating concat file: {concat_file}")
-        with open(concat_file, "w") as f:
+        with open(concat_file, "w", encoding="utf-8") as f:
             for file_path in input_files:
-                abs_path = file_path.resolve()
-                f.write(f"file '{abs_path}'\n")
+                escaped = self._escape_path(file_path)
+                f.write(f"file '{escaped}'\n")
 
         return concat_file
 
@@ -75,22 +84,17 @@ class VideoMerger:
             return True
         except subprocess.CalledProcessError as e:
             self._logger.error(f"FFmpeg error (exit code {e.returncode}): {e.stderr}")
-            print(f"FFmpeg error: {e.stderr}")
             return False
         except FileNotFoundError:
             self._logger.error("ffmpeg not found in PATH")
             raise RuntimeError("ffmpeg not found. Please install ffmpeg.")
 
-    def _cleanup_files(self, input_files: list[Path], concat_file: Path):
+    def _cleanup_files(self, input_files: list[Path]) -> None:
         self._logger.debug(f"Cleaning up {len(input_files)} input files")
         for file_path in input_files:
             try:
-                file_path.unlink()
+                if file_path.exists():
+                    file_path.unlink()
             except Exception as e:
                 self._logger.warning(f"Could not delete {file_path}: {e}")
-                print(f"Warning: Could not delete {file_path}: {e}")
 
-        try:
-            concat_file.unlink()
-        except Exception as e:
-            self._logger.warning(f"Could not delete concat file {concat_file}: {e}")
