@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 import requests
 
-from amcrest_api import AmcrestClient
+from amcrest_api import AmcrestAuthError, AmcrestClient
 from models import TimeRange, Recording
 
 
@@ -303,6 +303,20 @@ class TestAmcrestClientParsing(unittest.TestCase):
         self.assertEqual(len(recordings), 2)
         self.assertEqual(recordings[0].file_path, Path("/mnt/sd/early.mp4"))
         self.assertEqual(recordings[1].file_path, Path("/mnt/sd/late.mp4"))
+
+    def test_get_raises_auth_error_on_401(self):
+        resp = MagicMock()
+        resp.status_code = 401
+        with patch.object(self.client._session, "get", return_value=resp):
+            with self.assertRaises(AmcrestAuthError):
+                self.client._get("/cgi-bin/test.cgi")
+
+    def test_stream_to_file_raises_auth_error_on_401(self):
+        resp = MagicMock()
+        resp.status_code = 401
+        with patch.object(self.client._session, "get", return_value=resp):
+            with self.assertRaises(AmcrestAuthError):
+                self.client._stream_to_file("http://fake/url", Path("/fake/path"))
 
 
 if __name__ == "__main__":

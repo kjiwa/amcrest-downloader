@@ -11,6 +11,11 @@ from logger import get_logger
 from models import Recording, TimeRange
 
 
+class AmcrestAuthError(Exception):
+    """Raised when authentication with the camera fails."""
+    pass
+
+
 class AmcrestClient:
     DEFAULT_TIMEOUT = 10
     SEARCH_TIMEOUT = 30
@@ -110,6 +115,8 @@ class AmcrestClient:
             timeout = self.DEFAULT_TIMEOUT
         url = self._build_url(endpoint, params)
         response = self._session.get(url, timeout=timeout)
+        if response.status_code == 401:
+            raise AmcrestAuthError("Authentication failed: invalid username or password")
         response.raise_for_status()
         return response
 
@@ -308,11 +315,15 @@ class AmcrestClient:
         except Exception as e:
             if part_path.exists():
                 part_path.unlink()
+            if isinstance(e, AmcrestAuthError):
+                raise
             self._logger.error(f"Download failed for {recording.file_path}: {e}")
             raise RuntimeError(f"Failed to download recording: {e}")
 
     def _stream_to_file(self, url: str, local_path: Path) -> None:
         response = self._session.get(url, stream=True, timeout=self.DOWNLOAD_TIMEOUT)
+        if response.status_code == 401:
+            raise AmcrestAuthError("Authentication failed: invalid username or password")
         response.raise_for_status()
 
         with open(local_path, "wb") as f:

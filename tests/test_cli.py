@@ -7,6 +7,7 @@ import os
 
 from cli import CLI
 from models import Recording
+from amcrest_api import AmcrestAuthError
 from datetime import datetime
 
 
@@ -157,6 +158,42 @@ class TestCLI(unittest.TestCase):
         mock_client.find_recordings.assert_called_once()
         mock_downloader.download_all.assert_called_once()
         mock_merger.merge.assert_called_once()
+
+    def test_cli_argument_aliases(self):
+        args1 = self.cli._parser.parse_args([
+            "--host", "192.168.1.100",
+            "-u", "myuser",
+            "-p", "mypass",
+            "--start", "2026-01-16T08:00:00",
+            "--end", "2026-01-16T09:00:00",
+        ])
+        self.assertEqual(args1.username, "myuser")
+        self.assertEqual(args1.password, "mypass")
+
+        args2 = self.cli._parser.parse_args([
+            "--host", "192.168.1.100",
+            "--user", "myuser2",
+            "--start", "2026-01-16T08:00:00",
+            "--end", "2026-01-16T09:00:00",
+        ])
+        self.assertEqual(args2.username, "myuser2")
+
+    @patch("cli.AmcrestClient")
+    def test_run_auth_error_returns_1(self, mock_client_cls):
+        mock_client = MagicMock()
+        mock_client.__enter__.side_effect = AmcrestAuthError(
+            "Authentication failed: invalid username or password"
+        )
+        mock_client_cls.return_value = mock_client
+
+        exit_code = self.cli.run([
+            "--host", "192.168.1.100",
+            "--username", "admin",
+            "--password", "wrong",
+            "--start", "2026-01-16T08:00:00",
+            "--end", "2026-01-16T09:00:00",
+        ])
+        self.assertEqual(exit_code, 1)
 
 
 if __name__ == "__main__":

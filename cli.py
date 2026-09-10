@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from amcrest_api import AmcrestClient
+from amcrest_api import AmcrestAuthError, AmcrestClient
 from downloader import RecordingDownloader
 from logger import configure_logging, get_logger
 from merger import VideoMerger
@@ -55,13 +55,18 @@ class CLI:
             help="Camera HTTP/HTTPS port (or env AMCREST_PORT)",
         )
         parser.add_argument(
+            "-u",
             "--username",
+            "--user",
+            dest="username",
             default=env_user,
             required=env_user is None,
             help="Camera username (or env AMCREST_USERNAME)",
         )
         parser.add_argument(
+            "-p",
             "--password",
+            dest="password",
             default=env_pass,
             help="Camera password (or env AMCREST_PASSWORD, prompts if omitted)",
         )
@@ -153,6 +158,10 @@ class CLI:
         except KeyboardInterrupt:
             print("\nOperation cancelled by user.", file=sys.stderr)
             return 130
+        except AmcrestAuthError as e:
+            self._logger.error(str(e))
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
         except Exception as e:
             self._logger.error(f"Fatal error: {e}", exc_info=True)
             print(f"Error: {e}", file=sys.stderr)
