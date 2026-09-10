@@ -95,7 +95,7 @@ class AmcrestClient:
 
         url = f"{self._base_url}{endpoint}"
         if params:
-            encoded_params = urlencode(params, quote_via=quote, safe="")
+            encoded_params = urlencode(params, quote_via=quote, safe=":")
             url = f"{url}?{encoded_params}"
 
         return url
@@ -157,7 +157,7 @@ class AmcrestClient:
         params = {
             "action": "findFile",
             "object": finder_id,
-            "condition.Channel": channel,
+            "condition.Channel": channel + 1,
             "condition.StartTime": start_time,
             "condition.EndTime": end_time,
         }

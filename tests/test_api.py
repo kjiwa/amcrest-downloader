@@ -72,6 +72,38 @@ class TestAmcrestClientParsing(unittest.TestCase):
         c4 = AmcrestClient("camera.local", "admin", "pass", port=8000, ssl=True)
         self.assertEqual(c4._build_url("api"), "https://camera.local:8000/api")
 
+    def test_url_construction_preserves_colons_in_query_params(self):
+        c = AmcrestClient("192.168.1.50", "admin", "pass")
+        params = {"condition.StartTime": "2026-09-09 19:00:00", "action": "findFile"}
+        url = c._build_url("/cgi-bin/mediaFileFind.cgi", params=params)
+        self.assertIn("condition.StartTime=2026-09-09%2019:00:00", url)
+        self.assertNotIn("%3A", url)
+
+    @patch.object(AmcrestClient, "_get")
+    def test_start_search_maps_zero_based_channel_to_one_based(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.text = "OK\r\n"
+        mock_get.return_value = mock_resp
+
+        self.client._start_search(
+            finder_id="123",
+            start_time="2026-09-09 19:00:00",
+            end_time="2026-09-09 20:00:00",
+            channel=0,
+        )
+        mock_get.assert_called_once_with(
+            "/cgi-bin/mediaFileFind.cgi",
+            params={
+                "action": "findFile",
+                "object": "123",
+                "condition.Channel": 1,
+                "condition.StartTime": "2026-09-09 19:00:00",
+                "condition.EndTime": "2026-09-09 20:00:00",
+            },
+            timeout=self.client.SEARCH_TIMEOUT,
+        )
+
+
     @patch.object(AmcrestClient, "_get")
     def test_find_recordings_pagination_continues_after_snapshot_batch(self, mock_get):
         batch1_resp = MagicMock()
