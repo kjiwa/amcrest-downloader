@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 from datetime import datetime
 from pathlib import Path
+import requests
 
 from amcrest_api import AmcrestClient
 from models import TimeRange, Recording
@@ -102,6 +103,72 @@ class TestAmcrestClientParsing(unittest.TestCase):
             },
             timeout=self.client.SEARCH_TIMEOUT,
         )
+
+    @patch.object(AmcrestClient, "_get")
+    def test_start_search_returns_false_on_http_400(self, mock_get):
+        resp = MagicMock()
+        resp.status_code = 400
+        mock_get.side_effect = requests.exceptions.HTTPError(response=resp)
+
+        result = self.client._start_search(
+            finder_id="123",
+            start_time="2026-09-09 19:00:00",
+            end_time="2026-09-09 20:00:00",
+            channel=0,
+        )
+        self.assertFalse(result)
+
+    @patch.object(AmcrestClient, "_get")
+    def test_start_search_returns_false_on_non_ok_response(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.text = "Error\r\n"
+        mock_get.return_value = mock_resp
+
+        result = self.client._start_search(
+            finder_id="123",
+            start_time="2026-09-09 19:00:00",
+            end_time="2026-09-09 20:00:00",
+            channel=0,
+        )
+        self.assertFalse(result)
+
+    @patch.object(AmcrestClient, "_get")
+    def test_start_search_reraises_non_400_http_error(self, mock_get):
+        resp = MagicMock()
+        resp.status_code = 500
+        mock_get.side_effect = requests.exceptions.HTTPError(response=resp)
+
+        with self.assertRaises(requests.exceptions.HTTPError):
+            self.client._start_search(
+                finder_id="123",
+                start_time="2026-09-09 19:00:00",
+                end_time="2026-09-09 20:00:00",
+                channel=0,
+            )
+
+    @patch.object(AmcrestClient, "_get")
+    def test_find_recordings_returns_empty_list_on_http_400(self, mock_get):
+        create_resp = MagicMock(text="result=999\n")
+        err_resp = MagicMock()
+        err_resp.status_code = 400
+        search_err = requests.exceptions.HTTPError(response=err_resp)
+        close_resp = MagicMock(text="OK\n")
+        destroy_resp = MagicMock(text="OK\n")
+
+        mock_get.side_effect = [
+            create_resp,
+            search_err,
+            close_resp,
+            destroy_resp,
+        ]
+
+        tr = TimeRange(
+            start=datetime(2026, 1, 16, 8, 0, 0),
+            end=datetime(2026, 1, 16, 10, 0, 0),
+        )
+        recordings = self.client.find_recordings(tr, channel=0)
+        self.assertEqual(recordings, [])
+        self.assertEqual(mock_get.call_count, 4)
 
 
     @patch.object(AmcrestClient, "_get")

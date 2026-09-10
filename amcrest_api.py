@@ -119,7 +119,8 @@ class AmcrestClient:
         start_str, end_str = time_range.to_amcrest_format()
         finder_id = self._create_finder()
         try:
-            self._start_search(finder_id, start_str, end_str, channel)
+            if not self._start_search(finder_id, start_str, end_str, channel):
+                return []
             recordings = self._retrieve_all_results(finder_id)
             return sorted(recordings)
         finally:
@@ -150,7 +151,7 @@ class AmcrestClient:
 
     def _start_search(
         self, finder_id: str, start_time: str, end_time: str, channel: int
-    ) -> None:
+    ) -> bool:
         self._logger.info(
             f"Starting search: channel={channel}, start={start_time}, end={end_time}"
         )
@@ -161,15 +162,18 @@ class AmcrestClient:
             "condition.StartTime": start_time,
             "condition.EndTime": end_time,
         }
-        response = self._get(
-            "/cgi-bin/mediaFileFind.cgi", params=params, timeout=self.SEARCH_TIMEOUT
-        )
-        self._validate_search_response(response.text)
-
-    def _validate_search_response(self, response_text: str) -> None:
-        if "ok" not in response_text.lower():
-            self._logger.error(f"Search validation failed: {response_text}")
-            raise RuntimeError(f"Search failed: {response_text}")
+        try:
+            response = self._get(
+                "/cgi-bin/mediaFileFind.cgi", params=params, timeout=self.SEARCH_TIMEOUT
+            )
+            return "ok" in response.text.lower()
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 400:
+                self._logger.debug(
+                    f"Search returned HTTP 400 (no recordings found): {e}"
+                )
+                return False
+            raise
 
 
     def _retrieve_all_results(self, finder_id: str) -> list[Recording]:
