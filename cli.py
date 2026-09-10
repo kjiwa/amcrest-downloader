@@ -1,6 +1,7 @@
 import argparse
 import getpass
 import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Optional
@@ -22,7 +23,21 @@ class CLI:
         env_port = os.getenv("AMCREST_PORT")
         env_user = os.getenv("AMCREST_USERNAME")
         env_pass = os.getenv("AMCREST_PASSWORD")
-        env_chan = os.getenv("AMCREST_CHANNEL", "0")
+        env_chan = os.getenv("AMCREST_CHANNEL")
+
+        parsed_port: Optional[int] = None
+        if env_port:
+            try:
+                parsed_port = int(env_port)
+            except ValueError:
+                pass
+
+        parsed_channel = 0
+        if env_chan:
+            try:
+                parsed_channel = int(env_chan)
+            except ValueError:
+                pass
 
         parser = argparse.ArgumentParser(
             description="Download and merge Amcrest/Dahua camera recordings"
@@ -36,7 +51,7 @@ class CLI:
         parser.add_argument(
             "--port",
             type=int,
-            default=int(env_port) if env_port else None,
+            default=parsed_port,
             help="Camera HTTP/HTTPS port (or env AMCREST_PORT)",
         )
         parser.add_argument(
@@ -73,7 +88,7 @@ class CLI:
         parser.add_argument(
             "--channel",
             type=int,
-            default=int(env_chan),
+            default=parsed_channel,
             help="Camera channel index (default: 0, or env AMCREST_CHANNEL)",
         )
         parser.add_argument(
@@ -174,10 +189,12 @@ class CLI:
             output_file = self._determine_output_file(
                 args.output_file, args.output_dir, args.output_format, time_range
             )
-            merge_success = self._merge_recordings(
-                downloaded_files, output_file, args.output_format, args.keep_files
-            )
-            self._cleanup_work_dir(args.output_dir, args.keep_files)
+            try:
+                merge_success = self._merge_recordings(
+                    downloaded_files, output_file, args.output_format, args.keep_files
+                )
+            finally:
+                self._cleanup_work_dir(args.output_dir, args.keep_files)
 
             if merge_success:
                 print(f"Successfully generated: {output_file}")
@@ -309,7 +326,7 @@ class CLI:
             self._logger.debug(f"Cleaning up work directory: {work_dir}")
             try:
                 if work_dir.exists():
-                    work_dir.rmdir()
+                    shutil.rmtree(work_dir, ignore_errors=True)
             except Exception as e:
                 self._logger.warning(f"Could not remove work directory {work_dir}: {e}")
 
@@ -325,7 +342,9 @@ class CLI:
         time_range: TimeRange,
     ) -> Path:
         if specified_output:
-            return specified_output
+            if specified_output.is_absolute():
+                return specified_output
+            return output_dir / specified_output
 
         timestamp = time_range.start.strftime("%Y%m%d_%H%M%S")
         filename = f"merged_{timestamp}.{output_format}"

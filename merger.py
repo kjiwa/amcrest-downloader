@@ -1,5 +1,7 @@
 import subprocess
+import tempfile
 from pathlib import Path
+from typing import Optional
 
 from logger import get_logger
 
@@ -27,6 +29,14 @@ class VideoMerger:
 
         try:
             success = self._execute_ffmpeg(concat_file, output_file)
+            if not success and self._output_format == "mp4":
+                self._logger.warning(
+                    "Direct stream copy failed for MP4; retrying with audio transcode to AAC"
+                )
+                success = self._execute_ffmpeg(
+                    concat_file, output_file, audio_codec="aac"
+                )
+
             if success:
                 self._logger.info(f"Merge completed successfully: {output_file}")
                 if cleanup:
@@ -50,33 +60,50 @@ class VideoMerger:
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
     def _escape_path(self, path: Path) -> str:
-        abs_str = str(path.resolve())
-        return abs_str.replace("'", "'\\''")
+        abs_str = str(path.resolve()).replace("\\", "\\\\").replace("'", "'\\''")
+        return abs_str
 
     def _create_concat_file(self, input_files: list[Path]) -> Path:
-        concat_file = input_files[0].parent / "concat_list.txt"
-        self._logger.debug(f"Creating concat file: {concat_file}")
-        with open(concat_file, "w", encoding="utf-8") as f:
+        parent_dir = input_files[0].parent
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            suffix=".txt",
+            prefix="concat_",
+            dir=parent_dir,
+            delete=False,
+        ) as f:
             for file_path in input_files:
                 escaped = self._escape_path(file_path)
                 f.write(f"file '{escaped}'\n")
+            concat_path = Path(f.name)
 
-        return concat_file
+        self._logger.debug(f"Creating concat file: {concat_path}")
+        return concat_path
 
-    def _execute_ffmpeg(self, concat_file: Path, output_file: Path) -> bool:
+    def _execute_ffmpeg(
+        self,
+        concat_file: Path,
+        output_file: Path,
+        audio_codec: Optional[str] = None,
+    ) -> bool:
         cmd = [
             "ffmpeg",
+            "-fflags",
+            "+genpts",
             "-f",
             "concat",
             "-safe",
             "0",
             "-i",
             str(concat_file),
-            "-c",
-            "copy",
-            "-y",
-            str(output_file),
         ]
+        if audio_codec:
+            cmd.extend(["-c:v", "copy", "-c:a", audio_codec])
+        else:
+            cmd.extend(["-c", "copy"])
+
+        cmd.extend(["-avoid_negative_ts", "make_zero", "-y", str(output_file)])
 
         self._logger.debug(f"Executing ffmpeg command: {' '.join(cmd)}")
         try:
@@ -97,4 +124,5 @@ class VideoMerger:
                     file_path.unlink()
             except Exception as e:
                 self._logger.warning(f"Could not delete {file_path}: {e}")
+
 

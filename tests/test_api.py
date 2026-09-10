@@ -85,6 +85,7 @@ class TestAmcrestClientParsing(unittest.TestCase):
 
         create_resp = MagicMock(text="result=999\n")
         search_resp = MagicMock(text="OK\n")
+        close_resp = MagicMock(text="OK\n")
         destroy_resp = MagicMock(text="OK\n")
 
         mock_get.side_effect = [
@@ -93,6 +94,7 @@ class TestAmcrestClientParsing(unittest.TestCase):
             batch1_resp,
             batch2_resp,
             batch3_resp,
+            close_resp,
             destroy_resp,
         ]
 
@@ -145,6 +147,63 @@ class TestAmcrestClientParsing(unittest.TestCase):
 
             self.assertFalse(dest.exists())
             self.assertFalse((Path(td) / "out.mp4.part").exists())
+
+
+    def test_url_construction_ipv6(self):
+        c1 = AmcrestClient("[::1]", "admin", "pass")
+        self.assertEqual(c1._build_url("api"), "http://[::1]/api")
+
+        c2 = AmcrestClient("[::1]:8080", "admin", "pass")
+        self.assertEqual(c2._build_url("api"), "http://[::1]:8080/api")
+
+        c3 = AmcrestClient("::1", "admin", "pass", port=8443, ssl=True)
+        self.assertEqual(c3._build_url("api"), "https://[::1]:8443/api")
+
+    @patch.object(AmcrestClient, "_get")
+    def test_fetch_next_batch_handles_leading_blank_lines(self, mock_get):
+        resp = MagicMock()
+        resp.text = "\r\n\r\nfound=1\r\nitems[0].FilePath=/mnt/sd/test.mp4\r\n"
+        mock_get.return_value = resp
+
+        text, count = self.client._fetch_next_batch("finder_123")
+        self.assertEqual(count, 1)
+        self.assertIn("found=1", text)
+
+    @patch.object(AmcrestClient, "_get")
+    def test_find_recordings_sorts_chronologically(self, mock_get):
+        batch1_resp = MagicMock()
+        batch1_resp.text = (
+            "found=2\n"
+            "items[0].FilePath=/mnt/sd/late.mp4\n"
+            "items[0].StartTime=2026-01-16 09:00:00\n"
+            "items[0].EndTime=2026-01-16 09:15:00\n"
+            "items[1].FilePath=/mnt/sd/early.mp4\n"
+            "items[1].StartTime=2026-01-16 08:00:00\n"
+            "items[1].EndTime=2026-01-16 08:15:00\n"
+        )
+        batch2_resp = MagicMock(text="found=0\n")
+        create_resp = MagicMock(text="result=111\n")
+        search_resp = MagicMock(text="OK\n")
+        close_resp = MagicMock(text="OK\n")
+        destroy_resp = MagicMock(text="OK\n")
+
+        mock_get.side_effect = [
+            create_resp,
+            search_resp,
+            batch1_resp,
+            batch2_resp,
+            close_resp,
+            destroy_resp,
+        ]
+
+        tr = TimeRange(
+            start=datetime(2026, 1, 16, 8, 0, 0),
+            end=datetime(2026, 1, 16, 10, 0, 0),
+        )
+        recordings = self.client.find_recordings(tr, channel=0)
+        self.assertEqual(len(recordings), 2)
+        self.assertEqual(recordings[0].file_path, Path("/mnt/sd/early.mp4"))
+        self.assertEqual(recordings[1].file_path, Path("/mnt/sd/late.mp4"))
 
 
 if __name__ == "__main__":

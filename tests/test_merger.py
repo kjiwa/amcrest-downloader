@@ -50,8 +50,8 @@ class TestVideoMerger(unittest.TestCase):
         self.assertTrue(success)
         self.assertFalse(file1.exists())
         self.assertFalse(file2.exists())
-        concat_file = self.temp_dir / "concat_list.txt"
-        self.assertFalse(concat_file.exists())
+        concat_files = list(self.temp_dir.glob("concat_*.txt"))
+        self.assertEqual(concat_files, [])
 
     @patch("subprocess.run")
     def test_merge_failure_cleans_up_concat_file(self, mock_run):
@@ -64,8 +64,28 @@ class TestVideoMerger(unittest.TestCase):
         success = self.merger.merge([file1], output_file, cleanup=True)
         self.assertFalse(success)
         self.assertTrue(file1.exists())  # input file kept on failure
-        concat_file = self.temp_dir / "concat_list.txt"
-        self.assertFalse(concat_file.exists())  # concat file always cleaned up
+        concat_files = list(self.temp_dir.glob("concat_*.txt"))
+        self.assertEqual(concat_files, [])
+
+    @patch("subprocess.run")
+    def test_merge_fallback_to_aac_on_mp4_failure(self, mock_run):
+        file1 = self.temp_dir / "1.mp4"
+        file1.write_text("data1")
+        output_file = self.temp_dir / "merged.mp4"
+
+        mock_run.side_effect = [
+            subprocess.CalledProcessError(
+                1, "ffmpeg", stderr="Could not find tag for codec pcm_alaw"
+            ),
+            MagicMock(returncode=0),
+        ]
+
+        success = self.merger.merge([file1], output_file, cleanup=False)
+        self.assertTrue(success)
+        self.assertEqual(mock_run.call_count, 2)
+        second_cmd = mock_run.call_args_list[1][0][0]
+        self.assertIn("-c:a", second_cmd)
+        self.assertIn("aac", second_cmd)
 
 
 if __name__ == "__main__":

@@ -44,6 +44,17 @@ class TestTimeRange(unittest.TestCase):
         self.assertEqual(end_str, "2026-01-16 10:00:00")
 
 
+    def test_mixed_timezone_awareness_raises_value_error(self):
+        tz = timezone(timedelta(hours=-5))
+        start = datetime(2026, 1, 16, 8, 0, 0, tzinfo=tz)
+        end = datetime(2026, 1, 16, 10, 0, 0)
+        with self.assertRaises(ValueError):
+            TimeRange(start=start, end=end)
+
+        with self.assertRaises(ValueError):
+            TimeRange(start=end, end=start)
+
+
 class TestRecording(unittest.TestCase):
     def test_recording_creation_and_attributes(self):
         start = datetime(2026, 1, 16, 8, 0, 0)
@@ -69,6 +80,23 @@ class TestRecording(unittest.TestCase):
             start_time=datetime(2026, 1, 16, 8, 15, 0),
             end_time=datetime(2026, 1, 16, 8, 30, 0),
             file_path=Path("/mnt/sd/2.mp4"),
+        )
+        self.assertLess(rec1, rec2)
+        self.assertGreater(rec2, rec1)
+        self.assertLessEqual(rec1, rec2)
+        self.assertGreaterEqual(rec2, rec1)
+        self.assertEqual(sorted([rec2, rec1]), [rec1, rec2])
+
+    def test_recording_tie_breaking(self):
+        rec1 = Recording(
+            start_time=datetime(2026, 1, 16, 8, 0, 0),
+            end_time=datetime(2026, 1, 16, 8, 15, 0),
+            file_path=Path("/mnt/sd/a.mp4"),
+        )
+        rec2 = Recording(
+            start_time=datetime(2026, 1, 16, 8, 0, 0),
+            end_time=datetime(2026, 1, 16, 8, 15, 0),
+            file_path=Path("/mnt/sd/b.mp4"),
         )
         self.assertLess(rec1, rec2)
         self.assertEqual(sorted([rec2, rec1]), [rec1, rec2])

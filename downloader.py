@@ -34,13 +34,14 @@ class RecordingDownloader:
         if not recordings:
             return []
 
+        sorted_recs = sorted(recordings)
         self._logger.info(
-            f"Starting download of {len(recordings)} recordings to {output_dir}"
+            f"Starting download of {len(sorted_recs)} recordings to {output_dir}"
         )
         self._prepare_output_dir(output_dir)
 
         with ThreadPoolExecutor(max_workers=self._max_concurrent) as executor:
-            futures = self._submit_download_tasks(recordings, output_dir, executor)
+            futures = self._submit_download_tasks(sorted_recs, output_dir, executor)
             downloaded_files = self._await_completion(futures, progress_callback)
 
         self._logger.info(

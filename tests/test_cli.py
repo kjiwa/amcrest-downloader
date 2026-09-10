@@ -38,6 +38,31 @@ class TestCLI(unittest.TestCase):
         out = self.cli._determine_output_file(custom_path, self.temp_dir, "mp4", tr)
         self.assertEqual(out, custom_path)
 
+    def test_determine_output_file_relative_uses_output_dir(self):
+        tr = self.cli._parse_time_range("2026-01-16T08:00:00", "2026-01-16T10:00:00")
+        relative_path = Path("custom.mp4")
+        out = self.cli._determine_output_file(relative_path, self.temp_dir, "mp4", tr)
+        self.assertEqual(out, self.temp_dir / "custom.mp4")
+
+    @patch.dict(os.environ, {"AMCREST_PORT": "notanumber", "AMCREST_CHANNEL": "invalid"})
+    def test_env_port_and_channel_invalid_fallbacks(self):
+        cli = CLI()
+        args = cli._parser.parse_args([
+            "--host", "192.168.1.100",
+            "--username", "admin",
+            "--start", "2026-01-16T08:00:00",
+            "--end", "2026-01-16T10:00:00",
+        ])
+        self.assertIsNone(args.port)
+        self.assertEqual(args.channel, 0)
+
+    def test_cleanup_work_dir_removes_non_empty_dir(self):
+        work_dir = self.temp_dir / ".amcrest_download"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        (work_dir / "leftover.mp4").write_text("data")
+        self.cli._cleanup_work_dir(self.temp_dir, keep_files=False)
+        self.assertFalse(work_dir.exists())
+
     @patch.dict(os.environ, {"AMCREST_PASSWORD": "env_password"})
     @patch("cli.AmcrestClient")
     def test_run_with_env_password_and_list_only(self, mock_client_cls):

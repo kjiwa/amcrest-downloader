@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
+from functools import total_ordering
 from pathlib import Path
 
 
@@ -9,6 +10,10 @@ class TimeRange:
     end: datetime
 
     def __post_init__(self):
+        if (self.start.tzinfo is None) != (self.end.tzinfo is None):
+            raise ValueError(
+                "Start and end times must both be timezone-aware or both be timezone-naive"
+            )
         if self.start > self.end:
             raise ValueError(
                 f"Start time ({self.start}) must be before or equal to end time ({self.end})"
@@ -22,11 +27,10 @@ class TimeRange:
 
     def to_amcrest_format(self) -> tuple[str, str]:
         fmt = "%Y-%m-%d %H:%M:%S"
-        start = self.start.replace(tzinfo=None) if self.start.tzinfo else self.start
-        end = self.end.replace(tzinfo=None) if self.end.tzinfo else self.end
-        return start.strftime(fmt), end.strftime(fmt)
+        return self.start.strftime(fmt), self.end.strftime(fmt)
 
 
+@total_ordering
 @dataclass
 class Recording:
     start_time: datetime
@@ -46,5 +50,21 @@ class Recording:
     def __lt__(self, other: "Recording") -> bool:
         if not isinstance(other, Recording):
             return NotImplemented
-        return self.start_time < other.start_time
+        return (self.start_time, self.end_time, str(self.file_path)) < (
+            other.start_time,
+            other.end_time,
+            str(other.file_path),
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Recording):
+            return NotImplemented
+        return (
+            self.start_time == other.start_time
+            and self.end_time == other.end_time
+            and self.file_path == other.file_path
+            and self.file_size == other.file_size
+            and self.channel == other.channel
+        )
+
 

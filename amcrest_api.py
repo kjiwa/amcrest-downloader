@@ -60,7 +60,18 @@ class AmcrestClient:
             target_port = port if port is not None else parsed.port
         else:
             scheme = "https" if ssl else "http"
-            if ":" in clean_host:
+            if clean_host.startswith("[") and "]" in clean_host:
+                bracket_end = clean_host.index("]")
+                hostname = clean_host[1:bracket_end]
+                remainder = clean_host[bracket_end + 1 :]
+                if remainder.startswith(":"):
+                    target_port = port if port is not None else int(remainder[1:])
+                else:
+                    target_port = port
+            elif clean_host.count(":") > 1:
+                hostname = clean_host
+                target_port = port
+            elif ":" in clean_host:
                 parts = clean_host.split(":", 1)
                 hostname = parts[0]
                 target_port = port if port is not None else int(parts[1])
@@ -68,9 +79,15 @@ class AmcrestClient:
                 hostname = clean_host
                 target_port = port
 
+        host_str = (
+            f"[{hostname}]"
+            if ":" in hostname and not hostname.startswith("[")
+            else hostname
+        )
+
         if target_port:
-            return f"{scheme}://{hostname}:{target_port}"
-        return f"{scheme}://{hostname}"
+            return f"{scheme}://{host_str}:{target_port}"
+        return f"{scheme}://{host_str}"
 
     def _build_url(self, endpoint: str, params: Optional[dict] = None) -> str:
         if not endpoint.startswith("/"):
@@ -103,8 +120,10 @@ class AmcrestClient:
         finder_id = self._create_finder()
         try:
             self._start_search(finder_id, start_str, end_str, channel)
-            return self._retrieve_all_results(finder_id)
+            recordings = self._retrieve_all_results(finder_id)
+            return sorted(recordings)
         finally:
+            self._close_finder(finder_id)
             self._destroy_finder(finder_id)
 
     def _create_finder(self) -> str:
@@ -184,19 +203,16 @@ class AmcrestClient:
             "/cgi-bin/mediaFileFind.cgi", params=params, timeout=self.SEARCH_TIMEOUT
         )
 
-        lines = response.text.splitlines()
-        if not lines:
-            return "", 0
+        for line in response.text.splitlines():
+            clean_line = line.strip()
+            if clean_line.startswith("found="):
+                count_str = clean_line.split("=", 1)[1].strip()
+                try:
+                    return response.text, int(count_str)
+                except ValueError:
+                    return "", 0
 
-        first_line = lines[0].strip()
-        if not first_line.startswith("found="):
-            return "", 0
-
-        count_str = first_line.split("=", 1)[1].strip()
-        try:
-            return response.text, int(count_str)
-        except ValueError:
-            return "", 0
+        return "", 0
 
     def _parse_recordings(self, response_text: str) -> list[Recording]:
         item_pattern = re.compile(r"^items\[(\d+)\]\.(.+?)=(.*)$")
@@ -247,6 +263,18 @@ class AmcrestClient:
                 f"Failed to parse recording item {file_data}: {e}"
             )
             return None
+
+    def _close_finder(self, finder_id: str) -> None:
+        self._logger.debug(f"Closing finder with ID: {finder_id}")
+        params = {
+            "action": "close",
+            "object": finder_id,
+        }
+        try:
+            self._get("/cgi-bin/mediaFileFind.cgi", params=params)
+            self._logger.debug(f"Successfully closed finder {finder_id}")
+        except Exception as e:
+            self._logger.warning(f"Failed to close finder {finder_id}: {e}")
 
     def _destroy_finder(self, finder_id: str) -> None:
         self._logger.debug(f"Destroying finder with ID: {finder_id}")
