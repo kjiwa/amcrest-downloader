@@ -2,6 +2,8 @@
 
 A Python utility to download and merge video recordings from Amcrest IP cameras using the HTTP API.
 
+![Demo](assets/demo.gif)
+
 ## Features
 
 - Search for recordings by date/time range
