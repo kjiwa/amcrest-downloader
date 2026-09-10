@@ -40,6 +40,7 @@ class CLI:
                 pass
 
         parser = argparse.ArgumentParser(
+            prog="amcrest-downloader",
             description="Download and merge Amcrest/Dahua camera recordings"
         )
         parser.add_argument(
@@ -195,12 +196,18 @@ class CLI:
                     file=sys.stderr,
                 )
 
+            output_format = args.output_format
+            if args.output_file and args.output_file.suffix:
+                suffix_fmt = args.output_file.suffix.lstrip(".").lower()
+                if suffix_fmt in VideoMerger.SUPPORTED_FORMATS:
+                    output_format = suffix_fmt
+
             output_file = self._determine_output_file(
-                args.output_file, args.output_dir, args.output_format, time_range
+                args.output_file, args.output_dir, output_format, time_range
             )
             try:
                 merge_success = self._merge_recordings(
-                    downloaded_files, output_file, args.output_format, args.keep_files
+                    downloaded_files, output_file, output_format, args.keep_files
                 )
             finally:
                 self._cleanup_work_dir(args.output_dir, args.keep_files)

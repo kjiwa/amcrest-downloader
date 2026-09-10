@@ -3,7 +3,7 @@ from pathlib import Path
 import time
 from typing import Callable, Optional
 
-from amcrest_api import AmcrestClient
+from amcrest_api import AmcrestAuthError, AmcrestClient
 from logger import get_logger
 from models import Recording
 
@@ -109,6 +109,8 @@ class RecordingDownloader:
 
             try:
                 return self._client.download_recording(recording, output_path)
+            except AmcrestAuthError:
+                raise
             except Exception as e:
                 last_exception = e
                 if attempt < self._max_retries - 1:

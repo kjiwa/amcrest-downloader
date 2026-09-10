@@ -7,6 +7,7 @@ import shutil
 
 from downloader import RecordingDownloader
 from models import Recording
+from amcrest_api import AmcrestAuthError
 
 
 class TestRecordingDownloader(unittest.TestCase):
@@ -104,6 +105,20 @@ class TestRecordingDownloader(unittest.TestCase):
         self.assertTrue(success)
         self.assertEqual(attempts, 3)
         self.assertEqual(mock_sleep.call_count, 2)
+
+    @patch("time.sleep")
+    def test_download_auth_error_not_retried(self, mock_sleep):
+        rec = Recording(
+            start_time=datetime(2026, 1, 16, 8, 0, 0),
+            end_time=datetime(2026, 1, 16, 8, 15, 0),
+            file_path=Path("/mnt/sd/test1.mp4"),
+        )
+        self.mock_client.download_recording.side_effect = AmcrestAuthError("Unauthorized")
+        dest = self.temp_dir / "out.mp4"
+        with self.assertRaises(AmcrestAuthError):
+            self.downloader._download_with_retry(rec, dest)
+        mock_sleep.assert_not_called()
+        self.assertEqual(self.mock_client.download_recording.call_count, 1)
 
 
 if __name__ == "__main__":

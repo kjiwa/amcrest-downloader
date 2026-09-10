@@ -21,7 +21,7 @@ def configure_logging(
     log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     date_format = "%Y-%m-%d %H:%M:%S"
 
-    handlers = []
+    handlers: list[logging.Handler] = []
 
     if log_file:
         file_handler = logging.FileHandler(log_file, mode="a", encoding="utf-8")

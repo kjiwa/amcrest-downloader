@@ -87,6 +87,15 @@ class TestVideoMerger(unittest.TestCase):
         self.assertIn("-c:a", second_cmd)
         self.assertIn("aac", second_cmd)
 
+    @patch("subprocess.run")
+    def test_merge_ffmpeg_missing_raises_runtime_error(self, mock_run):
+        mock_run.side_effect = FileNotFoundError()
+        file1 = self.temp_dir / "1.mp4"
+        file1.write_text("data1")
+        output_file = self.temp_dir / "merged.mp4"
+        with self.assertRaises(RuntimeError):
+            self.merger.merge([file1], output_file)
+
 
 if __name__ == "__main__":
     unittest.main()

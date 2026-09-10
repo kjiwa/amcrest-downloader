@@ -13,13 +13,21 @@ A Python utility to download and merge video recordings from Amcrest IP cameras 
 - Environment variable configuration support
 - Dry-run / listing mode (`--list-only`)
 
-## Requirements
+## Installation
 
-- Python 3.10+
-- FFmpeg (must be installed and in PATH)
-- Dependencies: `requests`
+```bash
+pip install .
+```
+
+Requires FFmpeg installed and available in `PATH`.
 
 ## Usage
+
+```bash
+amcrest-downloader --host CAMERA_HOST --username USERNAME --start START_TIME --end END_TIME
+```
+
+Alternatively, invoke via Python directly:
 
 ```bash
 python main.py --host CAMERA_HOST --username USERNAME --start START_TIME --end END_TIME
@@ -27,7 +35,7 @@ python main.py --host CAMERA_HOST --username USERNAME --start START_TIME --end E
 
 ### Environment Variables
 
-The CLI can read configuration from environment variables if command-line arguments are omitted:
+The CLI reads configuration from environment variables if flags are omitted:
 
 - `AMCREST_HOST`: Camera IP address or hostname
 - `AMCREST_PORT`: Camera HTTP/HTTPS port
@@ -37,17 +45,17 @@ The CLI can read configuration from environment variables if command-line argume
 
 ### Required Arguments
 
-- `--host`: Camera IP address or hostname (e.g., `192.168.1.100` or `[::1]`) (or env `AMCREST_HOST`)
-- `--username`: Camera username (or env `AMCREST_USERNAME`)
+- `--host`: Camera IP address or hostname (e.g., `192.168.1.100` or `[::1]`, or env `AMCREST_HOST`)
+- `-u, --username, --user`: Camera username (or env `AMCREST_USERNAME`)
 - `--start`: Start time in ISO 8601 format (e.g., `2026-01-16T20:00:00` or `2026-01-16T20:00:00-08:00`)
 - `--end`: End time in ISO 8601 format (e.g., `2026-01-16T22:00:00` or `2026-01-16T22:00:00-08:00`)
 
 ### Optional Arguments
 
-- `--password`: Camera password (or env `AMCREST_PASSWORD`; prompts securely if omitted)
-- `--port`: Camera port (default: 80 or 443 if `--ssl`)
+- `-p, --password`: Camera password (or env `AMCREST_PASSWORD`; prompts securely if omitted)
+- `--port`: Camera port (default: 80, or 443 if `--ssl`)
 - `--ssl`: Connect using HTTPS protocol
-- `--no-verify-ssl`: Disable SSL/TLS certificate verification (useful for self-signed camera certificates)
+- `--no-verify-ssl`: Disable SSL/TLS certificate verification
 - `--channel`: Camera channel index, 0-based (default: `0`, or env `AMCREST_CHANNEL`)
 - `--output-format`: Output video format (`mp4`, `mkv`, `avi`, `mov`, `ts`, default: `mp4`)
 - `--output-dir`: Output directory (default: current working directory)
@@ -55,7 +63,7 @@ The CLI can read configuration from environment variables if command-line argume
 - `--keep-files`: Keep individual downloaded segment files after merge
 - `--max-concurrent`: Maximum concurrent downloads (default: `4`)
 - `--list-only`: List matching recordings in a table without downloading or merging
-- `--log-level`: Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, default: `INFO`)
+- `--log-level`: Logging level (`debug`, `info`, `warning`, `error`, `critical`, default: `warning`)
 - `--log-file`: Optional file path to write log output
 
 ### Examples
@@ -110,7 +118,15 @@ python main.py \
 - Amcrest cameras often record audio in G.711 PCM (`pcm_alaw`/`pcm_mulaw`). If `-c copy` fails when targeting MP4, the merger automatically falls back to `-c:a aac` while keeping video lossless.
 - Channel index is 0-based: `0` corresponds to the primary/only sensor on standalone cameras, and the first channel on multi-channel NVRs.
 - Gaps in recording coverage will appear as time jumps in the merged video.
-- Only mp4/dav video files are downloaded (jpg snapshots are skipped).
+- Only video files (.mp4, .dav, .mkv, .avi, .asf, .264) are downloaded; snapshots (.jpg) are skipped.
 - API endpoints used:
   - `/cgi-bin/mediaFileFind.cgi` - Search for recordings
   - `/cgi-bin/RPC_Loadfile/` - Download video files
+
+## Development
+
+Run the test suite:
+
+```bash
+python -m unittest discover
+```

@@ -1,22 +1,31 @@
-import unittest
-from unittest.mock import MagicMock, patch
-from pathlib import Path
-import tempfile
-import shutil
+import io
+import logging
 import os
+import shutil
+import tempfile
+import unittest
+from datetime import datetime
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
+from amcrest_api import AmcrestAuthError
 from cli import CLI
 from models import Recording
-from amcrest_api import AmcrestAuthError
-from datetime import datetime
 
 
 class TestCLI(unittest.TestCase):
     def setUp(self):
         self.cli = CLI()
         self.temp_dir = Path(tempfile.mkdtemp())
+        self._stdout_patch = patch("sys.stdout", new_callable=io.StringIO)
+        self._stderr_patch = patch("sys.stderr", new_callable=io.StringIO)
+        self.mock_stdout = self._stdout_patch.start()
+        self.mock_stderr = self._stderr_patch.start()
 
     def tearDown(self):
+        self._stdout_patch.stop()
+        self._stderr_patch.stop()
+        logging.getLogger().handlers = []
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
     def test_parse_time_range_valid(self):
@@ -194,6 +203,151 @@ class TestCLI(unittest.TestCase):
             "--end", "2026-01-16T09:00:00",
         ])
         self.assertEqual(exit_code, 1)
+
+    @patch("getpass.getpass", return_value="prompted_pass")
+    def test_resolve_password_prompt_success(self, mock_getpass):
+        password = self.cli._resolve_password(None)
+        self.assertEqual(password, "prompted_pass")
+        mock_getpass.assert_called_once()
+
+    @patch("getpass.getpass", side_effect=EOFError)
+    def test_resolve_password_prompt_eof(self, mock_getpass):
+        with self.assertRaises(ValueError):
+            self.cli._resolve_password(None)
+
+    @patch("cli.AmcrestClient")
+    def test_run_no_recordings_found(self, mock_client_cls):
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
+        mock_client.find_recordings.return_value = []
+        mock_client_cls.return_value = mock_client
+
+        exit_code = self.cli.run([
+            "--host", "192.168.1.100",
+            "--username", "admin",
+            "--password", "pass",
+            "--start", "2026-01-16T08:00:00",
+            "--end", "2026-01-16T09:00:00",
+        ])
+        self.assertEqual(exit_code, 0)
+
+    @patch("cli.RecordingDownloader")
+    @patch("cli.AmcrestClient")
+    def test_run_download_none_succeeded(self, mock_client_cls, mock_downloader_cls):
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
+        mock_client.find_recordings.return_value = [
+            Recording(
+                start_time=datetime(2026, 1, 16, 8, 0, 0),
+                end_time=datetime(2026, 1, 16, 8, 15, 0),
+                file_path=Path("/mnt/sd/test1.mp4"),
+                file_size=1024,
+            )
+        ]
+        mock_client_cls.return_value = mock_client
+
+        mock_downloader = MagicMock()
+        mock_downloader.download_all.return_value = []
+        mock_downloader_cls.return_value = mock_downloader
+
+        exit_code = self.cli.run([
+            "--host", "192.168.1.100",
+            "--username", "admin",
+            "--password", "pass",
+            "--start", "2026-01-16T08:00:00",
+            "--end", "2026-01-16T09:00:00",
+        ])
+        self.assertEqual(exit_code, 1)
+
+    @patch("cli.VideoMerger")
+    @patch("cli.RecordingDownloader")
+    @patch("cli.AmcrestClient")
+    def test_run_merge_failure(
+        self, mock_client_cls, mock_downloader_cls, mock_merger_cls
+    ):
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
+        mock_client.find_recordings.return_value = [
+            Recording(
+                start_time=datetime(2026, 1, 16, 8, 0, 0),
+                end_time=datetime(2026, 1, 16, 8, 15, 0),
+                file_path=Path("/mnt/sd/test1.mp4"),
+                file_size=1024,
+            )
+        ]
+        mock_client_cls.return_value = mock_client
+
+        mock_downloader = MagicMock()
+        mock_downloader.download_all.return_value = [self.temp_dir / "rec1.mp4"]
+        mock_downloader_cls.return_value = mock_downloader
+
+        mock_merger = MagicMock()
+        mock_merger.merge.return_value = False
+        mock_merger_cls.return_value = mock_merger
+
+        exit_code = self.cli.run([
+            "--host", "192.168.1.100",
+            "--username", "admin",
+            "--password", "pass",
+            "--start", "2026-01-16T08:00:00",
+            "--end", "2026-01-16T09:00:00",
+            "--output-dir", str(self.temp_dir),
+        ])
+        self.assertEqual(exit_code, 1)
+
+    @patch("cli.AmcrestClient")
+    def test_run_unhandled_exception(self, mock_client_cls):
+        mock_client = MagicMock()
+        mock_client.__enter__.side_effect = RuntimeError("Fatal hardware failure")
+        mock_client_cls.return_value = mock_client
+
+        exit_code = self.cli.run([
+            "--host", "192.168.1.100",
+            "--username", "admin",
+            "--password", "pass",
+            "--start", "2026-01-16T08:00:00",
+            "--end", "2026-01-16T09:00:00",
+        ])
+        self.assertEqual(exit_code, 1)
+
+    @patch("cli.VideoMerger")
+    @patch("cli.RecordingDownloader")
+    @patch("cli.AmcrestClient")
+    def test_output_format_inferred_from_output_file(
+        self, mock_client_cls, mock_downloader_cls, mock_merger_cls
+    ):
+        mock_merger_cls.SUPPORTED_FORMATS = {"mp4", "mkv", "avi", "mov", "ts"}
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
+        mock_client.find_recordings.return_value = [
+            Recording(
+                start_time=datetime(2026, 1, 16, 8, 0, 0),
+                end_time=datetime(2026, 1, 16, 8, 15, 0),
+                file_path=Path("/mnt/sd/test1.mp4"),
+                file_size=1024,
+            )
+        ]
+        mock_client_cls.return_value = mock_client
+
+        mock_downloader = MagicMock()
+        mock_downloader.download_all.return_value = [self.temp_dir / "rec1.mp4"]
+        mock_downloader_cls.return_value = mock_downloader
+
+        mock_merger = MagicMock()
+        mock_merger.merge.return_value = True
+        mock_merger_cls.return_value = mock_merger
+
+        exit_code = self.cli.run([
+            "--host", "192.168.1.100",
+            "--username", "admin",
+            "--password", "pass",
+            "--start", "2026-01-16T08:00:00",
+            "--end", "2026-01-16T09:00:00",
+            "--output-dir", str(self.temp_dir),
+            "--output-file", "final_video.mkv",
+        ])
+        self.assertEqual(exit_code, 0)
+        mock_merger_cls.assert_called_with("mkv")
 
 
 if __name__ == "__main__":

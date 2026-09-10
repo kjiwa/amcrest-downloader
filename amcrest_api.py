@@ -3,7 +3,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote, urlencode, urlsplit
+
 import requests
+import urllib3
 from requests.adapters import HTTPAdapter
 from requests.auth import HTTPDigestAuth
 
@@ -22,7 +24,7 @@ class AmcrestClient:
     DOWNLOAD_TIMEOUT = 60
     BATCH_SIZE = 100
     CHUNK_SIZE = 8192
-    SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".dav", ".mkv", ".avi", ".asf", ".264"}
+    SUPPORTED_VIDEO_EXTENSIONS = frozenset({".mp4", ".dav", ".mkv", ".avi", ".asf", ".264"})
 
     def __init__(
         self,
@@ -37,6 +39,8 @@ class AmcrestClient:
         self._base_url = self._format_base_url(host, port, ssl)
         self._auth = HTTPDigestAuth(username, password)
         self._verify_ssl = verify_ssl
+        if not verify_ssl:
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         self._session = requests.Session()
         self._session.auth = self._auth
         self._session.verify = verify_ssl
@@ -304,7 +308,7 @@ class AmcrestClient:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         part_path = output_path.with_name(f"{output_path.name}.part")
 
-        endpoint = f"/cgi-bin/RPC_Loadfile{str(recording.file_path)}"
+        endpoint = f"/cgi-bin/RPC_Loadfile/{str(recording.file_path).lstrip('/')}"
         url = self._build_url(endpoint)
 
         try:
