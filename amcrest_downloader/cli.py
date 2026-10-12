@@ -215,10 +215,7 @@ class CLI:
                 self._render_table(recordings)
                 return 0
 
-            try:
-                return self._download_and_merge(client, recordings, args, time_range)
-            finally:
-                self._cleanup_work_dir(args.output_dir, args.keep_files)
+            return self._download_and_merge(client, recordings, args, time_range)
 
     def _download_and_merge(
         self,
@@ -227,40 +224,55 @@ class CLI:
         args: argparse.Namespace,
         time_range: TimeRange,
     ) -> int:
-        downloaded_files = self._download_recordings(
-            client, recordings, args.output_dir, args.max_concurrent
-        )
-        if not downloaded_files:
-            print("No files were downloaded successfully.", file=sys.stderr)
-            return 1
-
-        if len(downloaded_files) < len(recordings):
-            print(
-                f"Warning: Only {len(downloaded_files)} of {len(recordings)} "
-                "segments downloaded successfully.",
-                file=sys.stderr,
+        removable = True
+        try:
+            downloaded_files = self._download_recordings(
+                client, recordings, args.output_dir, args.max_concurrent
             )
+            if not downloaded_files:
+                print("No files were downloaded successfully.", file=sys.stderr)
+                return 1
 
-        output_format = args.output_format
-        if args.output_file and args.output_file.suffix:
-            suffix_fmt = args.output_file.suffix.lstrip(".").lower()
-            if suffix_fmt in VideoMerger.SUPPORTED_FORMATS:
-                output_format = suffix_fmt
+            partial = len(downloaded_files) < len(recordings)
+            if partial:
+                print(
+                    f"Warning: Only {len(downloaded_files)} of {len(recordings)} "
+                    "segments downloaded successfully.",
+                    file=sys.stderr,
+                )
 
-        output_file = self._determine_output_file(
-            args.output_file, args.output_dir, output_format, time_range
-        )
-        if self._merge_recordings(downloaded_files, output_file, output_format, args.keep_files):
+            output_format = args.output_format
+            if args.output_file and args.output_file.suffix:
+                suffix_fmt = args.output_file.suffix.lstrip(".").lower()
+                if suffix_fmt in VideoMerger.SUPPORTED_FORMATS:
+                    output_format = suffix_fmt
+
+            output_file = self._determine_output_file(
+                args.output_file, args.output_dir, output_format, time_range
+            )
+            removable = False
+            if not self._merge_recordings(
+                downloaded_files, output_file, output_format, args.keep_files
+            ):
+                return 1
+            removable = True
             print(f"Successfully generated: {output_file}")
-            return 0
-        return 1
+            return 1 if partial else 0
+        finally:
+            if removable:
+                self._cleanup_work_dir(args.output_dir, args.keep_files)
+            else:
+                print(
+                    f"Merge failed; segments kept in {self._work_dir(args.output_dir)}",
+                    file=sys.stderr,
+                )
 
     def _resolve_password(self, cli_password: str | None) -> str:
         if cli_password:
             return cli_password
         try:
             return getpass.getpass("Camera Password: ")
-        except (EOFError, Exception) as e:
+        except EOFError as e:
             raise ValueError(
                 "Password required. Provide via AMCREST_PASSWORD env var or --password flag "
                 "in non-interactive environments."
@@ -356,7 +368,7 @@ class CLI:
         max_concurrent: int,
     ) -> list[Path]:
         downloader = RecordingDownloader(client, max_concurrent=max_concurrent)
-        work_dir = output_dir / ".amcrest_download"
+        work_dir = self._work_dir(output_dir)
 
         self._logger.info(
             f"Starting download: {len(recordings)} recordings, max_concurrent={max_concurrent}"
@@ -381,15 +393,15 @@ class CLI:
         merger = VideoMerger(output_format)
         return merger.merge(downloaded_files, output_file, cleanup=not keep_files)
 
+    @staticmethod
+    def _work_dir(output_dir: Path) -> Path:
+        return output_dir / ".amcrest_download"
+
     def _cleanup_work_dir(self, output_dir: Path, keep_files: bool) -> None:
         if not keep_files:
-            work_dir = output_dir / ".amcrest_download"
+            work_dir = self._work_dir(output_dir)
             self._logger.debug(f"Cleaning up work directory: {work_dir}")
-            try:
-                if work_dir.exists():
-                    shutil.rmtree(work_dir, ignore_errors=True)
-            except Exception as e:
-                self._logger.warning(f"Could not remove work directory {work_dir}: {e}")
+            shutil.rmtree(work_dir, ignore_errors=True)
 
     def _print_progress(self, completed: int, total: int) -> None:
         percent = (completed / total) * 100 if total > 0 else 0

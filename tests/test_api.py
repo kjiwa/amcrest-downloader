@@ -325,9 +325,20 @@ class TestAmcrestClientParsing(unittest.TestCase):
     def test_stream_to_file_raises_auth_error_on_401(self):
         resp = MagicMock()
         resp.status_code = 401
+        resp.__enter__.return_value = resp
         with patch.object(self.client._session, "get", return_value=resp):
             with self.assertRaises(AmcrestAuthError):
                 self.client._stream_to_file("http://fake/url", Path("/fake/path"))
+
+    def test_stream_to_file_releases_connection_on_http_error(self):
+        resp = MagicMock()
+        resp.status_code = 500
+        resp.raise_for_status.side_effect = requests.HTTPError("500")
+        resp.__enter__.return_value = resp
+        with patch.object(self.client._session, "get", return_value=resp):
+            with self.assertRaises(requests.HTTPError):
+                self.client._stream_to_file("http://fake/url", Path("/fake/path"))
+        resp.__exit__.assert_called_once()
 
 
 class TestCurrentTime(unittest.TestCase):

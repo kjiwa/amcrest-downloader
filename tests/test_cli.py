@@ -603,6 +603,46 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(self._run_with_failing_download(download_all, "--keep-files"), 1)
         self.assertTrue((self.temp_dir / ".amcrest_download").exists())
 
+    def _run_with_merge(self, merge_result, downloaded=1, found=1, *extra):
+        def download_all(recordings, work_dir, progress_callback=None):
+            work_dir.mkdir(parents=True)
+            return [work_dir / f"seg{i}.mp4" for i in range(downloaded)]
+
+        with (
+            patch("amcrest_downloader.cli.AmcrestClient") as mock_client_cls,
+            patch("amcrest_downloader.cli.RecordingDownloader") as mock_downloader_cls,
+            patch("amcrest_downloader.cli.VideoMerger") as mock_merger_cls,
+        ):
+            mock_client = MagicMock()
+            mock_client.__enter__.return_value = mock_client
+            mock_client.find_recordings.return_value = [self._rec()] * found
+            mock_client_cls.return_value = mock_client
+            mock_downloader_cls.return_value.download_all.side_effect = download_all
+            if isinstance(merge_result, Exception):
+                mock_merger_cls.return_value.merge.side_effect = merge_result
+            else:
+                mock_merger_cls.return_value.merge.return_value = merge_result
+            return self.cli.run(self._base_args("--output-dir", str(self.temp_dir), *extra))
+
+    def test_work_dir_removed_when_merge_succeeds(self):
+        self.assertEqual(self._run_with_merge(True), 0)
+        self.assertFalse((self.temp_dir / ".amcrest_download").exists())
+
+    def test_work_dir_kept_when_merge_returns_false(self):
+        stderr = io.StringIO()
+        with patch("sys.stderr", stderr):
+            self.assertEqual(self._run_with_merge(False), 1)
+        work_dir = self.temp_dir / ".amcrest_download"
+        self.assertTrue(work_dir.exists())
+        self.assertIn(f"Merge failed; segments kept in {work_dir}", stderr.getvalue())
+
+    def test_work_dir_kept_when_merge_raises(self):
+        self.assertEqual(self._run_with_merge(RuntimeError("ffmpeg died")), 1)
+        self.assertTrue((self.temp_dir / ".amcrest_download").exists())
+
+    def test_partial_download_exits_1_but_merges(self):
+        self.assertEqual(self._run_with_merge(True, downloaded=1, found=2), 1)
+
     def test_work_dir_removed_on_keyboard_interrupt(self):
         def download_all(recordings, work_dir, progress_callback=None):
             work_dir.mkdir(parents=True)

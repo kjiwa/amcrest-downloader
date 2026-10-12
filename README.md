@@ -125,6 +125,7 @@ amcrest-downloader \
 - Password is prompted securely when not provided via `--password` or `AMCREST_PASSWORD`.
 - Individual recordings are downloaded to a temporary directory (`.amcrest_download`).
 - Videos are concatenated in chronological order.
+- If only some segments download, the merged file is still produced and the exit code is 1.
 - Amcrest cameras often record audio in G.711 PCM (`pcm_alaw`/`pcm_mulaw`). If `-c copy` fails when targeting MP4, the merger automatically falls back to `-c:a aac` while keeping video lossless.
 - Channel index is 0-based: `0` corresponds to the primary/only sensor on standalone cameras, and the first channel on multi-channel NVRs.
 - Gaps in recording coverage will appear as time jumps in the merged video.

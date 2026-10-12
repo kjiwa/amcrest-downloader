@@ -24,6 +24,14 @@ class TestTimeRange(unittest.TestCase):
         self.assertEqual(tr.start, datetime(2026, 1, 16, 8, 0, 0))
         self.assertEqual(tr.end, datetime(2026, 1, 16, 10, 0, 0))
 
+    def test_from_iso8601_trailing_z_equals_utc_offset(self):
+        for z in ("Z", "z"):
+            tr = TimeRange.from_iso8601(f"2026-01-16T08:00:00{z}", f"2026-01-16T10:00:00{z}")
+            expected = TimeRange.from_iso8601(
+                "2026-01-16T08:00:00+00:00", "2026-01-16T10:00:00+00:00"
+            )
+            self.assertEqual(tr, expected)
+
     def test_to_amcrest_format_naive(self):
         tr = TimeRange(
             start=datetime(2026, 1, 16, 8, 0, 0),

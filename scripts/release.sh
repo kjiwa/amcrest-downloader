@@ -91,7 +91,7 @@ _check_preconditions() {
     exit 1
   fi
 
-  if git -C "$REPO_ROOT" ls-remote --tags origin "$TAG" | grep -q "$TAG"; then
+  if git -C "$REPO_ROOT" ls-remote --tags origin "$TAG" | grep -Fq "refs/tags/$TAG"; then
     echo "release: tag '$TAG' already exists on origin" >&2
     exit 1
   fi

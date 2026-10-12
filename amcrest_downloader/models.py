@@ -20,7 +20,13 @@ class TimeRange:
 
     @classmethod
     def from_iso8601(cls, start_str: str, end_str: str) -> "TimeRange":
-        return cls(start=datetime.fromisoformat(start_str), end=datetime.fromisoformat(end_str))
+        return cls(start=cls._parse_iso8601(start_str), end=cls._parse_iso8601(end_str))
+
+    @staticmethod
+    def _parse_iso8601(value: str) -> datetime:
+        if value[-1:] in ("Z", "z"):
+            value = value[:-1] + "+00:00"
+        return datetime.fromisoformat(value)
 
     def to_camera_local(self, offset: timedelta) -> "TimeRange":
         if self.start.tzinfo is None:

@@ -324,15 +324,15 @@ class AmcrestClient:
             raise RuntimeError(f"Failed to download recording: {e}") from e
 
     def _stream_to_file(self, url: str, local_path: Path) -> None:
-        response = self._session.get(url, stream=True, timeout=self.DOWNLOAD_TIMEOUT)
-        if response.status_code == 401:
-            raise AmcrestAuthError("Authentication failed: invalid username or password")
-        response.raise_for_status()
+        with self._session.get(url, stream=True, timeout=self.DOWNLOAD_TIMEOUT) as response:
+            if response.status_code == 401:
+                raise AmcrestAuthError("Authentication failed: invalid username or password")
+            response.raise_for_status()
 
-        with open(local_path, "wb") as f:
-            for chunk in response.iter_content(chunk_size=self.CHUNK_SIZE):
-                if chunk:
-                    f.write(chunk)
+            with open(local_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=self.CHUNK_SIZE):
+                    if chunk:
+                        f.write(chunk)
 
     def close(self) -> None:
         self._session.close()
