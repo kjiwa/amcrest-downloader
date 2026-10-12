@@ -18,7 +18,9 @@ A Python utility to download and merge video recordings from Amcrest IP cameras 
 ## Installation
 
 ```bash
-pip install .
+pipx install amcrest-downloader
+# or
+uv tool install amcrest-downloader
 ```
 
 Requires FFmpeg installed and available in `PATH`.
@@ -29,10 +31,10 @@ Requires FFmpeg installed and available in `PATH`.
 amcrest-downloader --host CAMERA_HOST --username USERNAME --start START_TIME --end END_TIME
 ```
 
-Alternatively, invoke via Python directly:
+Alternatively, invoke as a module:
 
 ```bash
-python main.py --host CAMERA_HOST --username USERNAME --start START_TIME --end END_TIME
+python -m amcrest_downloader --host CAMERA_HOST --username USERNAME --start START_TIME --end END_TIME
 ```
 
 ### Environment Variables
@@ -67,12 +69,18 @@ The CLI reads configuration from environment variables if flags are omitted:
 - `--list-only`: List matching recordings in a table without downloading or merging
 - `--log-level`: Logging level (`debug`, `info`, `warning`, `error`, `critical`, default: `warning`)
 - `--log-file`: Optional file path to write log output
+- `--version`: Print the version and exit
+
+### Timezones
+
+- Naive `--start`/`--end` values are used as the camera's local time.
+- Aware values are converted to camera local time using the camera's current UTC offset, read from its clock and rounded to 15 minutes. If DST changed between the recording and now, the window shifts by an hour.
 
 ### Examples
 
 Basic usage:
 ```bash
-python main.py \
+amcrest-downloader \
   --host 192.168.1.100 \
   --username admin \
   --start "2026-01-16T08:00:00" \
@@ -81,7 +89,7 @@ python main.py \
 
 With timezone and HTTPS:
 ```bash
-python main.py \
+amcrest-downloader \
   --host kitchen.cameras.home.com \
   --username admin \
   --ssl \
@@ -91,7 +99,7 @@ python main.py \
 
 Custom output and settings:
 ```bash
-python main.py \
+amcrest-downloader \
   --host 192.168.1.100 \
   --username admin \
   --start "2026-01-16T20:00:00" \
@@ -104,7 +112,7 @@ python main.py \
 
 List recordings only:
 ```bash
-python main.py \
+amcrest-downloader \
   --host 192.168.1.100 \
   --username admin \
   --start "2026-01-16T08:00:00" \
@@ -117,6 +125,7 @@ python main.py \
 - Password is prompted securely when not provided via `--password` or `AMCREST_PASSWORD`.
 - Individual recordings are downloaded to a temporary directory (`.amcrest_download`).
 - Videos are concatenated in chronological order.
+- If only some segments download, the merged file is still produced and the exit code is 1.
 - Amcrest cameras often record audio in G.711 PCM (`pcm_alaw`/`pcm_mulaw`). If `-c copy` fails when targeting MP4, the merger automatically falls back to `-c:a aac` while keeping video lossless.
 - Channel index is 0-based: `0` corresponds to the primary/only sensor on standalone cameras, and the first channel on multi-channel NVRs.
 - Gaps in recording coverage will appear as time jumps in the merged video.
@@ -127,8 +136,4 @@ python main.py \
 
 ## Development
 
-Run the test suite:
-
-```bash
-python -m unittest discover
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md).

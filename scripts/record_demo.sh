@@ -1,14 +1,16 @@
 #!/bin/sh
 set -eu
 
-readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-readonly REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-readonly ASSETS_DIR="$REPO_ROOT/assets"
-readonly FRAMES_DIR="$ASSETS_DIR/demo_frames.png"
-readonly OUTPUT_GIF="$ASSETS_DIR/demo.gif"
-readonly MOCK_PORT="8765"
-
 main() {
+    SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+    readonly SCRIPT_DIR
+    REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+    readonly REPO_ROOT
+    readonly ASSETS_DIR="$REPO_ROOT/assets"
+    readonly FRAMES_DIR="$ASSETS_DIR/demo_frames.png"
+    readonly OUTPUT_GIF="$ASSETS_DIR/demo.gif"
+    readonly MOCK_PORT="8765"
+
     _main_status=0
 
     cd "$REPO_ROOT"
@@ -17,21 +19,21 @@ main() {
 
     # Start mock camera server
     python3 "$REPO_ROOT/demo/mock_camera.py" "$MOCK_PORT" </dev/null >/dev/null 2>&1 &
-    _mock_pid="$!"
+    _main_mock_pid="$!"
 
     # Wait for mock camera server to be ready
-    _ready=0
-    for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    _main_ready=0
+    for _main_i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
         if curl -s "http://127.0.0.1:$MOCK_PORT/healthz" >/dev/null 2>&1; then
-            _ready=1
+            _main_ready=1
             break
         fi
         sleep 0.1
     done
 
-    if [ "$_ready" -ne 1 ]; then
+    if [ "$_main_ready" -ne 1 ]; then
         echo "Error: mock camera server failed to start" >&2
-        kill "$_mock_pid" 2>/dev/null || true
+        kill "$_main_mock_pid" 2>/dev/null || true
         return 1
     fi
 
@@ -39,7 +41,7 @@ main() {
 
     # Shutdown mock camera server
     curl -s "http://127.0.0.1:$MOCK_PORT/shutdown" >/dev/null 2>&1 || true
-    wait "$_mock_pid" 2>/dev/null || true
+    wait "$_main_mock_pid" 2>/dev/null || true
 
     if [ -d "$FRAMES_DIR" ]; then
         ffmpeg -y \
@@ -65,5 +67,3 @@ main() {
 }
 
 main "$@"
-
-

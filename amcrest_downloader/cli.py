@@ -1,47 +1,79 @@
 import argparse
 import getpass
+import logging
 import os
 import shutil
 import sys
+from datetime import datetime, timedelta, timezone
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Optional
 
-from amcrest_api import AmcrestAuthError, AmcrestClient
-from downloader import RecordingDownloader
-from logger import configure_logging, get_logger
-from merger import VideoMerger
-from models import Recording, TimeRange
+from amcrest_downloader.api import AmcrestClient
+from amcrest_downloader.downloader import RecordingDownloader
+from amcrest_downloader.merger import VideoMerger
+from amcrest_downloader.models import Recording, TimeRange
+
+
+def _version() -> str:
+    try:
+        return version("amcrest-downloader")
+    except PackageNotFoundError:
+        return "unknown"
+
+
+def configure_logging(
+    level: str = "warning",
+    log_file: Path | None = None,
+) -> None:
+    log_level = getattr(logging, level.upper(), logging.WARNING)
+    handler: logging.Handler = (
+        logging.FileHandler(log_file, mode="a", encoding="utf-8")
+        if log_file
+        else logging.StreamHandler(sys.stderr)
+    )
+    handler.setLevel(log_level)
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s", "%Y-%m-%d %H:%M:%S"
+        )
+    )
+    logging.basicConfig(level=log_level, handlers=[handler], force=True)
+
+
+def _int_in_range(low: int, high: int | None = None):
+    def parse(value: str) -> int:
+        try:
+            number = int(value)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"invalid integer: {value!r}") from None
+        if number < low or (high is not None and number > high):
+            bound = f">= {low}" if high is None else f"between {low} and {high}"
+            raise argparse.ArgumentTypeError(f"must be {bound}, got {number}")
+        return number
+
+    return parse
 
 
 class CLI:
     def __init__(self):
         self._parser = self._create_parser()
-        self._logger = get_logger(__name__)
+        self._logger = logging.getLogger(__name__)
 
     def _create_parser(self) -> argparse.ArgumentParser:
         env_host = os.getenv("AMCREST_HOST")
-        env_port = os.getenv("AMCREST_PORT")
+        env_port = os.getenv("AMCREST_PORT") or None
         env_user = os.getenv("AMCREST_USERNAME")
         env_pass = os.getenv("AMCREST_PASSWORD")
-        env_chan = os.getenv("AMCREST_CHANNEL")
-
-        parsed_port: Optional[int] = None
-        if env_port:
-            try:
-                parsed_port = int(env_port)
-            except ValueError:
-                pass
-
-        parsed_channel = 0
-        if env_chan:
-            try:
-                parsed_channel = int(env_chan)
-            except ValueError:
-                pass
+        env_chan = os.getenv("AMCREST_CHANNEL") or "0"
 
         parser = argparse.ArgumentParser(
             prog="amcrest-downloader",
-            description="Download and merge Amcrest/Dahua camera recordings"
+            description="Download and merge Amcrest/Dahua camera recordings",
+        )
+        parser.add_argument(
+            "--version",
+            action="version",
+            version=f"%(prog)s {_version()}",
         )
         parser.add_argument(
             "--host",
@@ -51,8 +83,8 @@ class CLI:
         )
         parser.add_argument(
             "--port",
-            type=int,
-            default=parsed_port,
+            type=_int_in_range(1, 65535),
+            default=env_port,
             help="Camera HTTP/HTTPS port (or env AMCREST_PORT)",
         )
         parser.add_argument(
@@ -93,8 +125,8 @@ class CLI:
         )
         parser.add_argument(
             "--channel",
-            type=int,
-            default=parsed_channel,
+            type=_int_in_range(0),
+            default=env_chan,
             help="Camera channel index (default: 0, or env AMCREST_CHANNEL)",
         )
         parser.add_argument(
@@ -121,7 +153,7 @@ class CLI:
         )
         parser.add_argument(
             "--max-concurrent",
-            type=int,
+            type=_int_in_range(1),
             default=4,
             help="Maximum concurrent downloads (default: 4)",
         )
@@ -143,7 +175,7 @@ class CLI:
         )
         return parser
 
-    def run(self, args: Optional[list[str]] = None) -> int:
+    def run(self, args: list[str] | None = None) -> int:
         try:
             parsed_args = self._parser.parse_args(args)
         except SystemExit as e:
@@ -159,23 +191,23 @@ class CLI:
         except KeyboardInterrupt:
             print("\nOperation cancelled by user.", file=sys.stderr)
             return 130
-        except AmcrestAuthError as e:
-            self._logger.error(str(e))
-            print(f"Error: {e}", file=sys.stderr)
-            return 1
         except Exception as e:
-            self._logger.error(f"Fatal error: {e}", exc_info=True)
+            self._logger.debug("Fatal error", exc_info=True)
             print(f"Error: {e}", file=sys.stderr)
             return 1
-
 
     def _execute(self, args: argparse.Namespace) -> int:
         self._logger.info("Starting Amcrest recording downloader")
+        if not args.list_only and shutil.which("ffmpeg") is None:
+            print("Error: ffmpeg not found. Please install ffmpeg.", file=sys.stderr)
+            return 1
+
         password = self._resolve_password(args.password)
         time_range = self._parse_time_range(args.start, args.end)
 
         with self._create_client(args, password) as client:
-            recordings = self._search_recordings(client, time_range, args.channel)
+            search_range = self._to_camera_range(client, time_range)
+            recordings = self._search_recordings(client, search_range, args.channel)
             if not recordings:
                 return 0
 
@@ -183,6 +215,17 @@ class CLI:
                 self._render_table(recordings)
                 return 0
 
+            return self._download_and_merge(client, recordings, args, time_range)
+
+    def _download_and_merge(
+        self,
+        client: AmcrestClient,
+        recordings: list[Recording],
+        args: argparse.Namespace,
+        time_range: TimeRange,
+    ) -> int:
+        removable = True
+        try:
             downloaded_files = self._download_recordings(
                 client, recordings, args.output_dir, args.max_concurrent
             )
@@ -190,9 +233,11 @@ class CLI:
                 print("No files were downloaded successfully.", file=sys.stderr)
                 return 1
 
-            if len(downloaded_files) < len(recordings):
+            partial = len(downloaded_files) < len(recordings)
+            if partial:
                 print(
-                    f"Warning: Only {len(downloaded_files)} of {len(recordings)} segments downloaded successfully.",
+                    f"Warning: Only {len(downloaded_files)} of {len(recordings)} "
+                    "segments downloaded successfully.",
                     file=sys.stderr,
                 )
 
@@ -205,41 +250,51 @@ class CLI:
             output_file = self._determine_output_file(
                 args.output_file, args.output_dir, output_format, time_range
             )
-            try:
-                merge_success = self._merge_recordings(
-                    downloaded_files, output_file, output_format, args.keep_files
-                )
-            finally:
+            removable = False
+            if not self._merge_recordings(
+                downloaded_files, output_file, output_format, args.keep_files
+            ):
+                return 1
+            removable = True
+            print(f"Successfully generated: {output_file}")
+            return 1 if partial else 0
+        finally:
+            if removable:
                 self._cleanup_work_dir(args.output_dir, args.keep_files)
+            else:
+                print(
+                    f"Merge failed; segments kept in {self._work_dir(args.output_dir)}",
+                    file=sys.stderr,
+                )
 
-            if merge_success:
-                print(f"Successfully generated: {output_file}")
-                return 0
-            return 1
-
-    def _resolve_password(self, cli_password: Optional[str]) -> str:
+    def _resolve_password(self, cli_password: str | None) -> str:
         if cli_password:
             return cli_password
-        env_password = os.getenv("AMCREST_PASSWORD")
-        if env_password:
-            return env_password
         try:
             return getpass.getpass("Camera Password: ")
-        except (EOFError, Exception):
+        except EOFError as e:
             raise ValueError(
-                "Password required. Provide via AMCREST_PASSWORD env var or --password flag in non-interactive environments."
-            )
-
+                "Password required. Provide via AMCREST_PASSWORD env var or --password flag "
+                "in non-interactive environments."
+            ) from e
 
     def _parse_time_range(self, start_str: str, end_str: str) -> TimeRange:
         try:
             return TimeRange.from_iso8601(start_str, end_str)
         except Exception as e:
-            raise ValueError(f"Invalid date/time range: {e}")
+            raise ValueError(f"Invalid date/time range: {e}") from e
 
-    def _create_client(
-        self, args: argparse.Namespace, password: str
-    ) -> AmcrestClient:
+    def _to_camera_range(self, client: AmcrestClient, time_range: TimeRange) -> TimeRange:
+        if time_range.start.tzinfo is None:
+            return time_range
+        camera_now = client.current_time()
+        utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
+        quarter_hours = round((camera_now - utc_now).total_seconds() / 900)
+        offset = timedelta(minutes=15 * quarter_hours)
+        self._logger.info(f"Camera UTC offset: {offset}")
+        return time_range.to_camera_local(offset)
+
+    def _create_client(self, args: argparse.Namespace, password: str) -> AmcrestClient:
         return AmcrestClient(
             host=args.host,
             username=args.username,
@@ -249,7 +304,6 @@ class CLI:
             verify_ssl=not args.no_verify_ssl,
             max_connections=args.max_concurrent,
         )
-
 
     def _search_recordings(
         self, client: AmcrestClient, time_range: TimeRange, channel: int
@@ -283,7 +337,10 @@ class CLI:
         total_size = sum(r.file_size for r in recordings)
         total_duration = sum(r.duration_seconds for r in recordings)
 
-        header = f"{'#':<4} {'Start Time':<20} {'End Time':<20} {'Duration':<10} {'Size':<10} {'File Path'}"
+        header = (
+            f"{'#':<4} {'Start Time':<20} {'End Time':<20} "
+            f"{'Duration':<10} {'Size':<10} {'File Path'}"
+        )
         divider = "-" * len(header)
         print("\n" + divider)
         print(header)
@@ -293,12 +350,14 @@ class CLI:
             dur = f"{int(rec.duration_seconds)}s"
             size = self._format_size(rec.file_size)
             print(
-                f"{idx:<4} {str(rec.start_time):<20} {str(rec.end_time):<20} {dur:<10} {size:<10} {rec.file_path}"
+                f"{idx:<4} {rec.start_time!s:<20} {rec.end_time!s:<20} "
+                f"{dur:<10} {size:<10} {rec.file_path}"
             )
 
         print(divider)
         print(
-            f"Total: {len(recordings)} files | Duration: {int(total_duration)}s | Size: {self._format_size(total_size)}\n"
+            f"Total: {len(recordings)} files | Duration: {int(total_duration)}s | "
+            f"Size: {self._format_size(total_size)}\n"
         )
 
     def _download_recordings(
@@ -309,7 +368,7 @@ class CLI:
         max_concurrent: int,
     ) -> list[Path]:
         downloader = RecordingDownloader(client, max_concurrent=max_concurrent)
-        work_dir = output_dir / ".amcrest_download"
+        work_dir = self._work_dir(output_dir)
 
         self._logger.info(
             f"Starting download: {len(recordings)} recordings, max_concurrent={max_concurrent}"
@@ -328,23 +387,21 @@ class CLI:
         output_format: str,
         keep_files: bool,
     ) -> bool:
-        self._logger.info(
-            f"Starting merge: {len(downloaded_files)} files -> {output_file}"
-        )
+        self._logger.info(f"Starting merge: {len(downloaded_files)} files -> {output_file}")
         print(f"Merging {len(downloaded_files)} segment(s) into {output_file.name}...")
 
         merger = VideoMerger(output_format)
         return merger.merge(downloaded_files, output_file, cleanup=not keep_files)
 
+    @staticmethod
+    def _work_dir(output_dir: Path) -> Path:
+        return output_dir / ".amcrest_download"
+
     def _cleanup_work_dir(self, output_dir: Path, keep_files: bool) -> None:
         if not keep_files:
-            work_dir = output_dir / ".amcrest_download"
+            work_dir = self._work_dir(output_dir)
             self._logger.debug(f"Cleaning up work directory: {work_dir}")
-            try:
-                if work_dir.exists():
-                    shutil.rmtree(work_dir, ignore_errors=True)
-            except Exception as e:
-                self._logger.warning(f"Could not remove work directory {work_dir}: {e}")
+            shutil.rmtree(work_dir, ignore_errors=True)
 
     def _print_progress(self, completed: int, total: int) -> None:
         percent = (completed / total) * 100 if total > 0 else 0
@@ -352,7 +409,7 @@ class CLI:
 
     def _determine_output_file(
         self,
-        specified_output: Optional[Path],
+        specified_output: Path | None,
         output_dir: Path,
         output_format: str,
         time_range: TimeRange,
@@ -366,3 +423,6 @@ class CLI:
         filename = f"merged_{timestamp}.{output_format}"
         return output_dir / filename
 
+
+def main(argv: list[str] | None = None) -> int:
+    return CLI().run(argv)

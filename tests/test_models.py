@@ -1,8 +1,8 @@
 import unittest
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from models import TimeRange, Recording
+from amcrest_downloader.models import Recording, TimeRange
 
 
 class TestTimeRange(unittest.TestCase):
@@ -24,6 +24,14 @@ class TestTimeRange(unittest.TestCase):
         self.assertEqual(tr.start, datetime(2026, 1, 16, 8, 0, 0))
         self.assertEqual(tr.end, datetime(2026, 1, 16, 10, 0, 0))
 
+    def test_from_iso8601_trailing_z_equals_utc_offset(self):
+        for z in ("Z", "z"):
+            tr = TimeRange.from_iso8601(f"2026-01-16T08:00:00{z}", f"2026-01-16T10:00:00{z}")
+            expected = TimeRange.from_iso8601(
+                "2026-01-16T08:00:00+00:00", "2026-01-16T10:00:00+00:00"
+            )
+            self.assertEqual(tr, expected)
+
     def test_to_amcrest_format_naive(self):
         tr = TimeRange(
             start=datetime(2026, 1, 16, 8, 0, 0),
@@ -43,7 +51,6 @@ class TestTimeRange(unittest.TestCase):
         self.assertEqual(start_str, "2026-01-16 08:00:00")
         self.assertEqual(end_str, "2026-01-16 10:00:00")
 
-
     def test_mixed_timezone_awareness_raises_value_error(self):
         tz = timezone(timedelta(hours=-5))
         start = datetime(2026, 1, 16, 8, 0, 0, tzinfo=tz)
@@ -55,6 +62,25 @@ class TestTimeRange(unittest.TestCase):
             TimeRange(start=end, end=start)
 
 
+class TestTimeRangeToCameraLocal(unittest.TestCase):
+    def test_aware_range_becomes_naive_in_camera_clock(self):
+        tz = timezone(timedelta(hours=-8))
+        tr = TimeRange(datetime(2026, 1, 16, 8, tzinfo=tz), datetime(2026, 1, 16, 10, tzinfo=tz))
+        local = tr.to_camera_local(timedelta(hours=-8))
+        self.assertEqual(local.start, datetime(2026, 1, 16, 8))
+        self.assertEqual(local.end, datetime(2026, 1, 16, 10))
+
+    def test_same_instant_in_other_offset_gives_same_range(self):
+        a = TimeRange.from_iso8601("2026-01-16T08:00:00-08:00", "2026-01-16T10:00:00-08:00")
+        b = TimeRange.from_iso8601("2026-01-16T16:00:00+00:00", "2026-01-16T18:00:00+00:00")
+        offset = timedelta(hours=5, minutes=30)
+        self.assertEqual(a.to_camera_local(offset), b.to_camera_local(offset))
+
+    def test_naive_range_unchanged(self):
+        tr = TimeRange(datetime(2026, 1, 16, 8), datetime(2026, 1, 16, 10))
+        self.assertEqual(tr.to_camera_local(timedelta(hours=-8)), tr)
+
+
 class TestRecording(unittest.TestCase):
     def test_recording_creation_and_attributes(self):
         start = datetime(2026, 1, 16, 8, 0, 0)
@@ -62,7 +88,7 @@ class TestRecording(unittest.TestCase):
         rec = Recording(
             start_time=start,
             end_time=end,
-            file_path="/mnt/sd/test.mp4",
+            file_path=Path("/mnt/sd/test.mp4"),
             file_size=15000000,
             channel=0,
         )

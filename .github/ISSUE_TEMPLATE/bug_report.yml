@@ -1,0 +1,32 @@
+name: Bug report
+description: Something in amcrest-downloader doesn't work as documented.
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, and what you got instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: amcrest-downloader version
+      description: Output of `amcrest-downloader --version`.
+    validations:
+      required: true
+  - type: input
+    id: camera
+    attributes:
+      label: Camera model and firmware
+      description: Omit hostnames, addresses, and credentials.
+    validations:
+      required: false
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The command (without credentials) and, with `--log-level debug`, the output that shows the failure.
+    validations:
+      required: false

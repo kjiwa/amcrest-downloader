@@ -1,11 +1,12 @@
 import unittest
-from unittest.mock import MagicMock, patch
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import MagicMock, patch
+
 import requests
 
-from amcrest_api import AmcrestAuthError, AmcrestClient
-from models import TimeRange, Recording
+from amcrest_downloader.api import AmcrestAuthError, AmcrestClient
+from amcrest_downloader.models import Recording, TimeRange
 
 
 class TestAmcrestClientParsing(unittest.TestCase):
@@ -65,10 +66,14 @@ class TestAmcrestClientParsing(unittest.TestCase):
         self.assertEqual(c1._build_url("/cgi-bin/test.cgi"), "http://192.168.1.50/cgi-bin/test.cgi")
 
         c2 = AmcrestClient("http://192.168.1.50:8080", "admin", "pass")
-        self.assertEqual(c2._build_url("cgi-bin/test.cgi"), "http://192.168.1.50:8080/cgi-bin/test.cgi")
+        self.assertEqual(
+            c2._build_url("cgi-bin/test.cgi"), "http://192.168.1.50:8080/cgi-bin/test.cgi"
+        )
 
         c3 = AmcrestClient("https://camera.local:8443/", "admin", "pass")
-        self.assertEqual(c3._build_url("/cgi-bin/test.cgi"), "https://camera.local:8443/cgi-bin/test.cgi")
+        self.assertEqual(
+            c3._build_url("/cgi-bin/test.cgi"), "https://camera.local:8443/cgi-bin/test.cgi"
+        )
 
         c4 = AmcrestClient("camera.local", "admin", "pass", port=8000, ssl=True)
         self.assertEqual(c4._build_url("api"), "https://camera.local:8000/api")
@@ -170,14 +175,19 @@ class TestAmcrestClientParsing(unittest.TestCase):
         self.assertEqual(recordings, [])
         self.assertEqual(mock_get.call_count, 4)
 
-
     @patch.object(AmcrestClient, "_get")
     def test_find_recordings_pagination_continues_after_snapshot_batch(self, mock_get):
         batch1_resp = MagicMock()
-        batch1_resp.text = "found=1\nitems[0].FilePath=/mnt/sd/snap.jpg\nitems[0].StartTime=2026-01-16 08:00:00\nitems[0].EndTime=2026-01-16 08:00:01\n"
+        batch1_resp.text = (
+            "found=1\nitems[0].FilePath=/mnt/sd/snap.jpg\n"
+            "items[0].StartTime=2026-01-16 08:00:00\nitems[0].EndTime=2026-01-16 08:00:01\n"
+        )
 
         batch2_resp = MagicMock()
-        batch2_resp.text = "found=1\nitems[0].FilePath=/mnt/sd/video.mp4\nitems[0].StartTime=2026-01-16 08:00:00\nitems[0].EndTime=2026-01-16 08:15:00\n"
+        batch2_resp.text = (
+            "found=1\nitems[0].FilePath=/mnt/sd/video.mp4\n"
+            "items[0].StartTime=2026-01-16 08:00:00\nitems[0].EndTime=2026-01-16 08:15:00\n"
+        )
 
         batch3_resp = MagicMock()
         batch3_resp.text = "found=0\n"
@@ -208,6 +218,7 @@ class TestAmcrestClientParsing(unittest.TestCase):
     @patch.object(AmcrestClient, "_stream_to_file")
     def test_download_recording_atomic(self, mock_stream):
         import tempfile
+
         with tempfile.TemporaryDirectory() as td:
             rec = Recording(
                 start_time=datetime(2026, 1, 16, 8, 0, 0),
@@ -228,6 +239,7 @@ class TestAmcrestClientParsing(unittest.TestCase):
     @patch.object(AmcrestClient, "_stream_to_file")
     def test_download_recording_cleans_up_on_failure(self, mock_stream):
         import tempfile
+
         with tempfile.TemporaryDirectory() as td:
             rec = Recording(
                 start_time=datetime(2026, 1, 16, 8, 0, 0),
@@ -246,7 +258,6 @@ class TestAmcrestClientParsing(unittest.TestCase):
 
             self.assertFalse(dest.exists())
             self.assertFalse((Path(td) / "out.mp4.part").exists())
-
 
     def test_url_construction_ipv6(self):
         c1 = AmcrestClient("[::1]", "admin", "pass")
@@ -314,11 +325,46 @@ class TestAmcrestClientParsing(unittest.TestCase):
     def test_stream_to_file_raises_auth_error_on_401(self):
         resp = MagicMock()
         resp.status_code = 401
+        resp.__enter__.return_value = resp
         with patch.object(self.client._session, "get", return_value=resp):
             with self.assertRaises(AmcrestAuthError):
                 self.client._stream_to_file("http://fake/url", Path("/fake/path"))
 
+    def test_stream_to_file_releases_connection_on_http_error(self):
+        resp = MagicMock()
+        resp.status_code = 500
+        resp.raise_for_status.side_effect = requests.HTTPError("500")
+        resp.__enter__.return_value = resp
+        with patch.object(self.client._session, "get", return_value=resp):
+            with self.assertRaises(requests.HTTPError):
+                self.client._stream_to_file("http://fake/url", Path("/fake/path"))
+        resp.__exit__.assert_called_once()
+
+
+class TestCurrentTime(unittest.TestCase):
+    def setUp(self):
+        self.client = AmcrestClient("192.168.1.100", "admin", "password")
+
+    def _current_time(self, text):
+        with patch.object(AmcrestClient, "_get") as mock_get:
+            mock_get.return_value = MagicMock(text=text)
+            result = self.client.current_time()
+        mock_get.assert_called_once_with("/cgi-bin/global.cgi", params={"action": "getCurrentTime"})
+        return result
+
+    def test_current_time_parses_result_line(self):
+        self.assertEqual(
+            self._current_time("result=2026-01-16 08:30:15\r\n"), datetime(2026, 1, 16, 8, 30, 15)
+        )
+
+    def test_current_time_parses_first_key_value_line_with_a_timestamp(self):
+        text = "status=ok\r\nTime=2026-01-16 08:30:15\r\n"
+        self.assertEqual(self._current_time(text), datetime(2026, 1, 16, 8, 30, 15))
+
+    def test_current_time_raises_with_trimmed_raw_text(self):
+        with self.assertRaisesRegex(RuntimeError, "garbage"):
+            self._current_time("  garbage\r\n")
+
 
 if __name__ == "__main__":
     unittest.main()
-

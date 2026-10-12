@@ -1,0 +1,5 @@
+recursive-include tests *
+graft demo
+exclude demo/*.gif demo/*.png demo/*.tape
+exclude demo.tape
+prune assets
