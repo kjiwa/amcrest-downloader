@@ -11,7 +11,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: sh scripts/check-release.sh "$TAG" "$TITLE"
+      - run: gh extension install kjiwa/gh-cut
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - run: gh cut check "$TAG" "$TITLE"
         env:
           TAG: ${{ github.event.release.tag_name }}
           TITLE: ${{ github.event.release.name }}
