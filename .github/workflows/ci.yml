@@ -13,27 +13,57 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: Test
+  check:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
+        python-version: ['3.10', '3.14']
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - if: runner.os == 'macOS'
+        run: brew install shellcheck
+      - run: pip install -e .
+      - run: python3 -m unittest discover
+      - run: uv run --only-group dev ruff check
+      - run: uv run --only-group dev ruff format --check
 
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.x'
-          cache: pip
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: pip install -e .
+      - run: sh tests/e2e.sh
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run test suite
-        run: python3 -m unittest discover
+  release-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.x'
+      - run: pip install build twine
+      - run: python -m build
+      - run: twine check dist/*
 
   privacy:
     uses: kjiwa/.github/.github/workflows/privacy.yml@main

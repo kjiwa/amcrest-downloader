@@ -29,7 +29,8 @@ def _in_work_tree() -> bool:
 
 
 def _shell_scripts() -> list[str]:
-    return sorted(str(p.relative_to(ROOT)) for p in (ROOT / "scripts").glob("*.sh"))
+    paths = [*(ROOT / "scripts").glob("*.sh"), *(ROOT / "tests").glob("*.sh")]
+    return sorted(str(p.relative_to(ROOT)) for p in paths)
 
 
 def _console_scripts() -> dict[str, str]:
