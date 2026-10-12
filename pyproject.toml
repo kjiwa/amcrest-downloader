@@ -1,20 +1,50 @@
-[build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "amcrest-downloader"
 version = "0.2.0"
 description = "Download and merge video recordings from Amcrest IP cameras"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Kamil Jiwa", email = "kamil.jiwa@gmail.com" }]
+keywords = ["amcrest", "dahua", "camera", "cli", "ffmpeg", "video", "download"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Utilities",
+]
 dependencies = [
     "requests>=2.31.0",
 ]
 
-[project.scripts]
-amcrest-downloader = "main:main"
+[project.urls]
+Homepage = "https://github.com/kjiwa/amcrest-downloader"
+Repository = "https://github.com/kjiwa/amcrest-downloader"
+Issues = "https://github.com/kjiwa/amcrest-downloader/issues"
 
-[tool.setuptools]
-py-modules = ["amcrest_api", "cli", "downloader", "logger", "main", "merger", "models"]
+[project.scripts]
+amcrest-downloader = "amcrest_downloader.cli:main"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[dependency-groups]
+dev = ["ruff==0.16.10"]
+
+[tool.setuptools.packages.find]
+include = ["amcrest_downloader*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

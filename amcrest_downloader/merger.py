@@ -1,9 +1,7 @@
+import logging
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Optional
-
-from logger import get_logger
 
 
 class VideoMerger:
@@ -13,17 +11,13 @@ class VideoMerger:
         if output_format.lower() not in self.SUPPORTED_FORMATS:
             raise ValueError(f"Unsupported format: {output_format}")
         self._output_format = output_format.lower()
-        self._logger = get_logger(__name__)
+        self._logger = logging.getLogger(__name__)
 
-    def merge(
-        self, input_files: list[Path], output_file: Path, cleanup: bool = True
-    ) -> bool:
+    def merge(self, input_files: list[Path], output_file: Path, cleanup: bool = True) -> bool:
         if not input_files:
             raise ValueError("No input files to merge")
 
-        self._logger.info(
-            f"Starting merge of {len(input_files)} files to {output_file}"
-        )
+        self._logger.info(f"Starting merge of {len(input_files)} files to {output_file}")
         self._prepare_output_file(output_file)
         concat_file = self._create_concat_file(input_files)
 
@@ -33,9 +27,7 @@ class VideoMerger:
                 self._logger.warning(
                     "Direct stream copy failed for MP4; retrying with audio transcode to AAC"
                 )
-                success = self._execute_ffmpeg(
-                    concat_file, output_file, audio_codec="aac"
-                )
+                success = self._execute_ffmpeg(concat_file, output_file, audio_codec="aac")
 
             if success:
                 self._logger.info(f"Merge completed successfully: {output_file}")
@@ -85,7 +77,7 @@ class VideoMerger:
         self,
         concat_file: Path,
         output_file: Path,
-        audio_codec: Optional[str] = None,
+        audio_codec: str | None = None,
     ) -> bool:
         cmd = [
             "ffmpeg",
@@ -114,7 +106,7 @@ class VideoMerger:
             return False
         except FileNotFoundError:
             self._logger.error("ffmpeg not found in PATH")
-            raise RuntimeError("ffmpeg not found. Please install ffmpeg.")
+            raise RuntimeError("ffmpeg not found. Please install ffmpeg.") from None
 
     def _cleanup_files(self, input_files: list[Path]) -> None:
         self._logger.debug(f"Cleaning up {len(input_files)} input files")
@@ -124,5 +116,3 @@ class VideoMerger:
                     file_path.unlink()
             except Exception as e:
                 self._logger.warning(f"Could not delete {file_path}: {e}")
-
-

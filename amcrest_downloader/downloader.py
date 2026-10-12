@@ -1,11 +1,11 @@
+import logging
+import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-import time
-from typing import Callable, Optional
 
-from amcrest_api import AmcrestAuthError, AmcrestClient
-from logger import get_logger
-from models import Recording
+from amcrest_downloader.api import AmcrestAuthError, AmcrestClient
+from amcrest_downloader.models import Recording
 
 
 class RecordingDownloader:
@@ -23,26 +23,27 @@ class RecordingDownloader:
         self._max_concurrent = max_concurrent
         self._max_retries = max_retries
         self._backoff_base = backoff_base
-        self._logger = get_logger(__name__)
+        self._logger = logging.getLogger(__name__)
 
     def download_all(
         self,
         recordings: list[Recording],
         output_dir: Path,
-        progress_callback: Optional[Callable[[int, int], None]] = None,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> list[Path]:
         if not recordings:
             return []
 
         sorted_recs = sorted(recordings)
-        self._logger.info(
-            f"Starting download of {len(sorted_recs)} recordings to {output_dir}"
-        )
+        self._logger.info(f"Starting download of {len(sorted_recs)} recordings to {output_dir}")
         self._prepare_output_dir(output_dir)
 
-        with ThreadPoolExecutor(max_workers=self._max_concurrent) as executor:
+        executor = ThreadPoolExecutor(max_workers=self._max_concurrent)
+        try:
             futures = self._submit_download_tasks(sorted_recs, output_dir, executor)
             downloaded_files = self._await_completion(futures, progress_callback)
+        finally:
+            executor.shutdown(cancel_futures=True)
 
         self._logger.info(
             f"Download completed: {len(downloaded_files)}/{len(recordings)} files successful"
@@ -72,7 +73,7 @@ class RecordingDownloader:
     def _await_completion(
         self,
         futures: dict,
-        progress_callback: Optional[Callable[[int, int], None]],
+        progress_callback: Callable[[int, int], None] | None,
     ) -> list[Path]:
         downloaded_files: list[Path] = []
         completed = 0
@@ -83,6 +84,8 @@ class RecordingDownloader:
             try:
                 if future.result():
                     downloaded_files.append(output_file)
+            except AmcrestAuthError:
+                raise
             except Exception as e:
                 self._logger.warning(f"Download failed for {recording.file_path}: {e}")
 
@@ -92,9 +95,7 @@ class RecordingDownloader:
 
         return downloaded_files
 
-    def _generate_filename(
-        self, recording: Recording, output_dir: Path, index: int
-    ) -> Path:
+    def _generate_filename(self, recording: Recording, output_dir: Path, index: int) -> Path:
         timestamp = recording.start_time.strftime("%Y%m%d_%H%M%S")
         suffix = recording.file_path.suffix.lower() if recording.file_path.suffix else ".mp4"
         return output_dir / f"recording_{index:04d}_{timestamp}{suffix}"
@@ -126,4 +127,3 @@ class RecordingDownloader:
                     raise
 
         return False
-

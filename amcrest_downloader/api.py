@@ -1,7 +1,7 @@
+import logging
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 from urllib.parse import quote, urlencode, urlsplit
 
 import requests
@@ -9,12 +9,12 @@ import urllib3
 from requests.adapters import HTTPAdapter
 from requests.auth import HTTPDigestAuth
 
-from logger import get_logger
-from models import Recording, TimeRange
+from amcrest_downloader.models import Recording, TimeRange
 
 
 class AmcrestAuthError(Exception):
     """Raised when authentication with the camera fails."""
+
     pass
 
 
@@ -31,7 +31,7 @@ class AmcrestClient:
         host: str,
         username: str,
         password: str,
-        port: Optional[int] = None,
+        port: int | None = None,
         ssl: bool = False,
         verify_ssl: bool = True,
         max_connections: int = 10,
@@ -52,7 +52,7 @@ class AmcrestClient:
         self._session.mount("http://", adapter)
         self._session.mount("https://", adapter)
 
-        self._logger = get_logger(__name__)
+        self._logger = logging.getLogger(__name__)
 
     def __enter__(self) -> "AmcrestClient":
         return self
@@ -60,7 +60,7 @@ class AmcrestClient:
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.close()
 
-    def _format_base_url(self, host: str, port: Optional[int], ssl: bool) -> str:
+    def _format_base_url(self, host: str, port: int | None, ssl: bool) -> str:
         clean_host = host.strip()
         if clean_host.startswith(("http://", "https://")):
             parsed = urlsplit(clean_host)
@@ -88,17 +88,13 @@ class AmcrestClient:
                 hostname = clean_host
                 target_port = port
 
-        host_str = (
-            f"[{hostname}]"
-            if ":" in hostname and not hostname.startswith("[")
-            else hostname
-        )
+        host_str = f"[{hostname}]" if ":" in hostname and not hostname.startswith("[") else hostname
 
         if target_port:
             return f"{scheme}://{host_str}:{target_port}"
         return f"{scheme}://{host_str}"
 
-    def _build_url(self, endpoint: str, params: Optional[dict] = None) -> str:
+    def _build_url(self, endpoint: str, params: dict | None = None) -> str:
         if not endpoint.startswith("/"):
             endpoint = f"/{endpoint}"
 
@@ -112,8 +108,8 @@ class AmcrestClient:
     def _get(
         self,
         endpoint: str,
-        params: Optional[dict] = None,
-        timeout: Optional[int] = None,
+        params: dict | None = None,
+        timeout: int | None = None,
     ) -> requests.Response:
         if timeout is None:
             timeout = self.DEFAULT_TIMEOUT
@@ -124,9 +120,18 @@ class AmcrestClient:
         response.raise_for_status()
         return response
 
-    def find_recordings(
-        self, time_range: TimeRange, channel: int = 0
-    ) -> list[Recording]:
+    def current_time(self) -> datetime:
+        response = self._get("/cgi-bin/global.cgi", params={"action": "getCurrentTime"})
+        for line in response.text.splitlines():
+            if "=" not in line:
+                continue
+            try:
+                return datetime.strptime(line.split("=", 1)[1].strip(), "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                continue
+        raise RuntimeError(f"Unexpected getCurrentTime response: {response.text.strip()}")
+
+    def find_recordings(self, time_range: TimeRange, channel: int = 0) -> list[Recording]:
         start_str, end_str = time_range.to_amcrest_format()
         finder_id = self._create_finder()
         try:
@@ -145,27 +150,21 @@ class AmcrestClient:
 
         object_id = self._parse_object_id(response.text)
         if not object_id:
-            self._logger.error(
-                "Failed to create media file finder: no object ID returned"
-            )
+            self._logger.error("Failed to create media file finder: no object ID returned")
             raise RuntimeError("Failed to create media file finder")
 
         self._logger.debug(f"Created finder with ID: {object_id}")
         return object_id
 
-    def _parse_object_id(self, response_text: str) -> Optional[str]:
+    def _parse_object_id(self, response_text: str) -> str | None:
         for line in response_text.splitlines():
             line = line.strip()
             if line.startswith("result="):
                 return line.split("=", 1)[1].strip()
         return None
 
-    def _start_search(
-        self, finder_id: str, start_time: str, end_time: str, channel: int
-    ) -> bool:
-        self._logger.info(
-            f"Starting search: channel={channel}, start={start_time}, end={end_time}"
-        )
+    def _start_search(self, finder_id: str, start_time: str, end_time: str, channel: int) -> bool:
+        self._logger.info(f"Starting search: channel={channel}, start={start_time}, end={end_time}")
         params = {
             "action": "findFile",
             "object": finder_id,
@@ -180,12 +179,9 @@ class AmcrestClient:
             return "ok" in response.text.lower()
         except requests.exceptions.HTTPError as e:
             if e.response is not None and e.response.status_code == 400:
-                self._logger.debug(
-                    f"Search returned HTTP 400 (no recordings found): {e}"
-                )
+                self._logger.debug(f"Search returned HTTP 400 (no recordings found): {e}")
                 return False
             raise
-
 
     def _retrieve_all_results(self, finder_id: str) -> list[Recording]:
         recordings: list[Recording] = []
@@ -199,7 +195,8 @@ class AmcrestClient:
             batch_num += 1
             batch_recordings = self._parse_recordings(batch_text)
             self._logger.debug(
-                f"Retrieved batch {batch_num} ({file_count} raw items, {len(batch_recordings)} video recordings)"
+                f"Retrieved batch {batch_num} ({file_count} raw items, "
+                f"{len(batch_recordings)} video recordings)"
             )
             recordings.extend(batch_recordings)
 
@@ -252,8 +249,12 @@ class AmcrestClient:
 
         return recordings
 
-    def _create_recording(self, file_data: dict[str, str]) -> Optional[Recording]:
-        if "FilePath" not in file_data or "StartTime" not in file_data or "EndTime" not in file_data:
+    def _create_recording(self, file_data: dict[str, str]) -> Recording | None:
+        if (
+            "FilePath" not in file_data
+            or "StartTime" not in file_data
+            or "EndTime" not in file_data
+        ):
             return None
 
         file_path = Path(file_data["FilePath"])
@@ -274,9 +275,7 @@ class AmcrestClient:
                 channel=channel,
             )
         except Exception as e:
-            self._logger.warning(
-                f"Failed to parse recording item {file_data}: {e}"
-            )
+            self._logger.warning(f"Failed to parse recording item {file_data}: {e}")
             return None
 
     def _close_finder(self, finder_id: str) -> None:
@@ -322,7 +321,7 @@ class AmcrestClient:
             if isinstance(e, AmcrestAuthError):
                 raise
             self._logger.error(f"Download failed for {recording.file_path}: {e}")
-            raise RuntimeError(f"Failed to download recording: {e}")
+            raise RuntimeError(f"Failed to download recording: {e}") from e
 
     def _stream_to_file(self, url: str, local_path: Path) -> None:
         response = self._session.get(url, stream=True, timeout=self.DOWNLOAD_TIMEOUT)
@@ -337,4 +336,3 @@ class AmcrestClient:
 
     def close(self) -> None:
         self._session.close()
-

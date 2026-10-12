@@ -5,6 +5,7 @@ import sys
 import tempfile
 import threading
 import urllib.parse
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -83,8 +84,14 @@ class MockCameraHandler(http.server.BaseHTTPRequestHandler):
             else:
                 self.send_response(404)
                 self.end_headers()
+        elif url.path == "/cgi-bin/global.cgi":
+            self.send_response(200)
+            self.end_headers()
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            self.wfile.write(f"result={now}\r\n".encode())
         elif url.path.startswith("/cgi-bin/RPC_Loadfile/"):
             import time
+
             time.sleep(0.3)
             self.send_response(200)
             self.send_header("Content-Type", "video/mp4")

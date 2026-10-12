@@ -4,13 +4,13 @@ import os
 import shutil
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from amcrest_api import AmcrestAuthError
-from cli import CLI
-from models import Recording
+from amcrest_downloader.api import AmcrestAuthError
+from amcrest_downloader.cli import CLI, configure_logging, main
+from amcrest_downloader.models import Recording
 
 
 class TestCLI(unittest.TestCase):
@@ -21,8 +21,13 @@ class TestCLI(unittest.TestCase):
         self._stderr_patch = patch("sys.stderr", new_callable=io.StringIO)
         self.mock_stdout = self._stdout_patch.start()
         self.mock_stderr = self._stderr_patch.start()
+        self._which_patch = patch(
+            "amcrest_downloader.cli.shutil.which", return_value="/usr/bin/ffmpeg"
+        )
+        self._which_patch.start()
 
     def tearDown(self):
+        self._which_patch.stop()
         self._stdout_patch.stop()
         self._stderr_patch.stop()
         logging.getLogger().handlers = []
@@ -54,17 +59,53 @@ class TestCLI(unittest.TestCase):
         out = self.cli._determine_output_file(relative_path, self.temp_dir, "mp4", tr)
         self.assertEqual(out, self.temp_dir / "custom.mp4")
 
-    @patch.dict(os.environ, {"AMCREST_PORT": "notanumber", "AMCREST_CHANNEL": "invalid"})
-    def test_env_port_and_channel_invalid_fallbacks(self):
-        cli = CLI()
-        args = cli._parser.parse_args([
-            "--host", "192.168.1.100",
-            "--username", "admin",
-            "--start", "2026-01-16T08:00:00",
-            "--end", "2026-01-16T10:00:00",
-        ])
-        self.assertIsNone(args.port)
-        self.assertEqual(args.channel, 0)
+    def _base_args(self, *extra):
+        return [
+            "--host",
+            "192.168.1.100",
+            "--username",
+            "admin",
+            "--password",
+            "pass",
+            "--start",
+            "2026-01-16T08:00:00",
+            "--end",
+            "2026-01-16T10:00:00",
+            *extra,
+        ]
+
+    def test_invalid_env_port_is_an_error(self):
+        with patch.dict(os.environ, {"AMCREST_PORT": "notanumber"}):
+            self.assertEqual(CLI().run(self._base_args()), 2)
+        self.assertIn("--port", self.mock_stderr.getvalue())
+
+    def test_invalid_env_channel_is_an_error(self):
+        with patch.dict(os.environ, {"AMCREST_CHANNEL": "invalid"}):
+            self.assertEqual(CLI().run(self._base_args()), 2)
+        self.assertIn("--channel", self.mock_stderr.getvalue())
+
+    def test_valid_env_port_and_channel_are_used(self):
+        with patch.dict(os.environ, {"AMCREST_PORT": "8080", "AMCREST_CHANNEL": "2"}):
+            args = CLI()._parser.parse_args(self._base_args())
+        self.assertEqual(args.port, 8080)
+        self.assertEqual(args.channel, 2)
+
+    def test_out_of_range_numeric_options_are_errors(self):
+        for extra in (
+            ["--max-concurrent", "0"],
+            ["--port", "0"],
+            ["--port", "65536"],
+            ["--channel", "-1"],
+            ["--port", "abc"],
+        ):
+            with self.subTest(extra=extra):
+                self.assertEqual(self.cli.run(self._base_args(*extra)), 2)
+
+    def test_numeric_option_bounds_are_accepted(self):
+        args = self.cli._parser.parse_args(
+            self._base_args("--max-concurrent", "1", "--port", "65535", "--channel", "0")
+        )
+        self.assertEqual((args.max_concurrent, args.port, args.channel), (1, 65535, 0))
 
     def test_cleanup_work_dir_removes_non_empty_dir(self):
         work_dir = self.temp_dir / ".amcrest_download"
@@ -74,7 +115,7 @@ class TestCLI(unittest.TestCase):
         self.assertFalse(work_dir.exists())
 
     @patch.dict(os.environ, {"AMCREST_PASSWORD": "env_password"})
-    @patch("cli.AmcrestClient")
+    @patch("amcrest_downloader.cli.AmcrestClient")
     def test_run_with_env_password_and_list_only(self, mock_client_cls):
         mock_client = MagicMock()
         mock_client.__enter__.return_value = mock_client
@@ -88,19 +129,23 @@ class TestCLI(unittest.TestCase):
             )
         ]
 
-        exit_code = self.cli.run([
-            "--host", "192.168.1.100",
-            "--username", "admin",
-            "--start", "2026-01-16T08:00:00",
-            "--end", "2026-01-16T09:00:00",
-            "--list-only",
-        ])
+        exit_code = CLI().run(
+            [
+                "--host",
+                "192.168.1.100",
+                "--username",
+                "admin",
+                "--start",
+                "2026-01-16T08:00:00",
+                "--end",
+                "2026-01-16T09:00:00",
+                "--list-only",
+            ]
+        )
 
         self.assertEqual(exit_code, 0)
         mock_client.find_recordings.assert_called_once()
         mock_client.download_recording.assert_not_called()
-
-
 
     def test_format_size(self):
         self.assertEqual(self.cli._format_size(0), "0 B")
@@ -113,24 +158,31 @@ class TestCLI(unittest.TestCase):
         exit_code = self.cli.run([])
         self.assertEqual(exit_code, 2)
 
-    @patch("cli.AmcrestClient")
+    @patch("amcrest_downloader.cli.AmcrestClient")
     def test_run_keyboard_interrupt_returns_130(self, mock_client_cls):
         mock_client = MagicMock()
         mock_client.__enter__.side_effect = KeyboardInterrupt()
         mock_client_cls.return_value = mock_client
 
-        exit_code = self.cli.run([
-            "--host", "192.168.1.100",
-            "--username", "admin",
-            "--password", "pass",
-            "--start", "2026-01-16T08:00:00",
-            "--end", "2026-01-16T09:00:00",
-        ])
+        exit_code = self.cli.run(
+            [
+                "--host",
+                "192.168.1.100",
+                "--username",
+                "admin",
+                "--password",
+                "pass",
+                "--start",
+                "2026-01-16T08:00:00",
+                "--end",
+                "2026-01-16T09:00:00",
+            ]
+        )
         self.assertEqual(exit_code, 130)
 
-    @patch("cli.VideoMerger")
-    @patch("cli.RecordingDownloader")
-    @patch("cli.AmcrestClient")
+    @patch("amcrest_downloader.cli.VideoMerger")
+    @patch("amcrest_downloader.cli.RecordingDownloader")
+    @patch("amcrest_downloader.cli.AmcrestClient")
     def test_full_download_and_merge_flow(
         self, mock_client_cls, mock_downloader_cls, mock_merger_cls
     ):
@@ -154,14 +206,22 @@ class TestCLI(unittest.TestCase):
         mock_merger.merge.return_value = True
         mock_merger_cls.return_value = mock_merger
 
-        exit_code = self.cli.run([
-            "--host", "192.168.1.100",
-            "--username", "admin",
-            "--password", "pass",
-            "--start", "2026-01-16T08:00:00",
-            "--end", "2026-01-16T09:00:00",
-            "--output-dir", str(self.temp_dir),
-        ])
+        exit_code = self.cli.run(
+            [
+                "--host",
+                "192.168.1.100",
+                "--username",
+                "admin",
+                "--password",
+                "pass",
+                "--start",
+                "2026-01-16T08:00:00",
+                "--end",
+                "2026-01-16T09:00:00",
+                "--output-dir",
+                str(self.temp_dir),
+            ]
+        )
 
         self.assertEqual(exit_code, 0)
         mock_client.find_recordings.assert_called_once()
@@ -169,25 +229,38 @@ class TestCLI(unittest.TestCase):
         mock_merger.merge.assert_called_once()
 
     def test_cli_argument_aliases(self):
-        args1 = self.cli._parser.parse_args([
-            "--host", "192.168.1.100",
-            "-u", "myuser",
-            "-p", "mypass",
-            "--start", "2026-01-16T08:00:00",
-            "--end", "2026-01-16T09:00:00",
-        ])
+        args1 = self.cli._parser.parse_args(
+            [
+                "--host",
+                "192.168.1.100",
+                "-u",
+                "myuser",
+                "-p",
+                "mypass",
+                "--start",
+                "2026-01-16T08:00:00",
+                "--end",
+                "2026-01-16T09:00:00",
+            ]
+        )
         self.assertEqual(args1.username, "myuser")
         self.assertEqual(args1.password, "mypass")
 
-        args2 = self.cli._parser.parse_args([
-            "--host", "192.168.1.100",
-            "--user", "myuser2",
-            "--start", "2026-01-16T08:00:00",
-            "--end", "2026-01-16T09:00:00",
-        ])
+        args2 = self.cli._parser.parse_args(
+            [
+                "--host",
+                "192.168.1.100",
+                "--user",
+                "myuser2",
+                "--start",
+                "2026-01-16T08:00:00",
+                "--end",
+                "2026-01-16T09:00:00",
+            ]
+        )
         self.assertEqual(args2.username, "myuser2")
 
-    @patch("cli.AmcrestClient")
+    @patch("amcrest_downloader.cli.AmcrestClient")
     def test_run_auth_error_returns_1(self, mock_client_cls):
         mock_client = MagicMock()
         mock_client.__enter__.side_effect = AmcrestAuthError(
@@ -195,13 +268,20 @@ class TestCLI(unittest.TestCase):
         )
         mock_client_cls.return_value = mock_client
 
-        exit_code = self.cli.run([
-            "--host", "192.168.1.100",
-            "--username", "admin",
-            "--password", "wrong",
-            "--start", "2026-01-16T08:00:00",
-            "--end", "2026-01-16T09:00:00",
-        ])
+        exit_code = self.cli.run(
+            [
+                "--host",
+                "192.168.1.100",
+                "--username",
+                "admin",
+                "--password",
+                "wrong",
+                "--start",
+                "2026-01-16T08:00:00",
+                "--end",
+                "2026-01-16T09:00:00",
+            ]
+        )
         self.assertEqual(exit_code, 1)
 
     @patch("getpass.getpass", return_value="prompted_pass")
@@ -215,24 +295,31 @@ class TestCLI(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.cli._resolve_password(None)
 
-    @patch("cli.AmcrestClient")
+    @patch("amcrest_downloader.cli.AmcrestClient")
     def test_run_no_recordings_found(self, mock_client_cls):
         mock_client = MagicMock()
         mock_client.__enter__.return_value = mock_client
         mock_client.find_recordings.return_value = []
         mock_client_cls.return_value = mock_client
 
-        exit_code = self.cli.run([
-            "--host", "192.168.1.100",
-            "--username", "admin",
-            "--password", "pass",
-            "--start", "2026-01-16T08:00:00",
-            "--end", "2026-01-16T09:00:00",
-        ])
+        exit_code = self.cli.run(
+            [
+                "--host",
+                "192.168.1.100",
+                "--username",
+                "admin",
+                "--password",
+                "pass",
+                "--start",
+                "2026-01-16T08:00:00",
+                "--end",
+                "2026-01-16T09:00:00",
+            ]
+        )
         self.assertEqual(exit_code, 0)
 
-    @patch("cli.RecordingDownloader")
-    @patch("cli.AmcrestClient")
+    @patch("amcrest_downloader.cli.RecordingDownloader")
+    @patch("amcrest_downloader.cli.AmcrestClient")
     def test_run_download_none_succeeded(self, mock_client_cls, mock_downloader_cls):
         mock_client = MagicMock()
         mock_client.__enter__.return_value = mock_client
@@ -250,21 +337,26 @@ class TestCLI(unittest.TestCase):
         mock_downloader.download_all.return_value = []
         mock_downloader_cls.return_value = mock_downloader
 
-        exit_code = self.cli.run([
-            "--host", "192.168.1.100",
-            "--username", "admin",
-            "--password", "pass",
-            "--start", "2026-01-16T08:00:00",
-            "--end", "2026-01-16T09:00:00",
-        ])
+        exit_code = self.cli.run(
+            [
+                "--host",
+                "192.168.1.100",
+                "--username",
+                "admin",
+                "--password",
+                "pass",
+                "--start",
+                "2026-01-16T08:00:00",
+                "--end",
+                "2026-01-16T09:00:00",
+            ]
+        )
         self.assertEqual(exit_code, 1)
 
-    @patch("cli.VideoMerger")
-    @patch("cli.RecordingDownloader")
-    @patch("cli.AmcrestClient")
-    def test_run_merge_failure(
-        self, mock_client_cls, mock_downloader_cls, mock_merger_cls
-    ):
+    @patch("amcrest_downloader.cli.VideoMerger")
+    @patch("amcrest_downloader.cli.RecordingDownloader")
+    @patch("amcrest_downloader.cli.AmcrestClient")
+    def test_run_merge_failure(self, mock_client_cls, mock_downloader_cls, mock_merger_cls):
         mock_client = MagicMock()
         mock_client.__enter__.return_value = mock_client
         mock_client.find_recordings.return_value = [
@@ -285,34 +377,49 @@ class TestCLI(unittest.TestCase):
         mock_merger.merge.return_value = False
         mock_merger_cls.return_value = mock_merger
 
-        exit_code = self.cli.run([
-            "--host", "192.168.1.100",
-            "--username", "admin",
-            "--password", "pass",
-            "--start", "2026-01-16T08:00:00",
-            "--end", "2026-01-16T09:00:00",
-            "--output-dir", str(self.temp_dir),
-        ])
+        exit_code = self.cli.run(
+            [
+                "--host",
+                "192.168.1.100",
+                "--username",
+                "admin",
+                "--password",
+                "pass",
+                "--start",
+                "2026-01-16T08:00:00",
+                "--end",
+                "2026-01-16T09:00:00",
+                "--output-dir",
+                str(self.temp_dir),
+            ]
+        )
         self.assertEqual(exit_code, 1)
 
-    @patch("cli.AmcrestClient")
+    @patch("amcrest_downloader.cli.AmcrestClient")
     def test_run_unhandled_exception(self, mock_client_cls):
         mock_client = MagicMock()
         mock_client.__enter__.side_effect = RuntimeError("Fatal hardware failure")
         mock_client_cls.return_value = mock_client
 
-        exit_code = self.cli.run([
-            "--host", "192.168.1.100",
-            "--username", "admin",
-            "--password", "pass",
-            "--start", "2026-01-16T08:00:00",
-            "--end", "2026-01-16T09:00:00",
-        ])
+        exit_code = self.cli.run(
+            [
+                "--host",
+                "192.168.1.100",
+                "--username",
+                "admin",
+                "--password",
+                "pass",
+                "--start",
+                "2026-01-16T08:00:00",
+                "--end",
+                "2026-01-16T09:00:00",
+            ]
+        )
         self.assertEqual(exit_code, 1)
 
-    @patch("cli.VideoMerger")
-    @patch("cli.RecordingDownloader")
-    @patch("cli.AmcrestClient")
+    @patch("amcrest_downloader.cli.VideoMerger")
+    @patch("amcrest_downloader.cli.RecordingDownloader")
+    @patch("amcrest_downloader.cli.AmcrestClient")
     def test_output_format_inferred_from_output_file(
         self, mock_client_cls, mock_downloader_cls, mock_merger_cls
     ):
@@ -337,19 +444,208 @@ class TestCLI(unittest.TestCase):
         mock_merger.merge.return_value = True
         mock_merger_cls.return_value = mock_merger
 
-        exit_code = self.cli.run([
-            "--host", "192.168.1.100",
-            "--username", "admin",
-            "--password", "pass",
-            "--start", "2026-01-16T08:00:00",
-            "--end", "2026-01-16T09:00:00",
-            "--output-dir", str(self.temp_dir),
-            "--output-file", "final_video.mkv",
-        ])
+        exit_code = self.cli.run(
+            [
+                "--host",
+                "192.168.1.100",
+                "--username",
+                "admin",
+                "--password",
+                "pass",
+                "--start",
+                "2026-01-16T08:00:00",
+                "--end",
+                "2026-01-16T09:00:00",
+                "--output-dir",
+                str(self.temp_dir),
+                "--output-file",
+                "final_video.mkv",
+            ]
+        )
         self.assertEqual(exit_code, 0)
         mock_merger_cls.assert_called_with("mkv")
+
+    def _rec(self):
+        return Recording(
+            start_time=datetime(2026, 1, 16, 8, 0, 0),
+            end_time=datetime(2026, 1, 16, 8, 15, 0),
+            file_path=Path("/mnt/sd/test1.mp4"),
+            file_size=1024,
+        )
+
+    def _enable_logging(self):
+        logging.disable(logging.NOTSET)
+        self.addCleanup(logging.disable, logging.CRITICAL)
+
+    @patch("amcrest_downloader.cli.AmcrestClient")
+    def test_fatal_error_prints_one_error_line_and_no_traceback(self, mock_client_cls):
+        self._enable_logging()
+        mock_client = MagicMock()
+        mock_client.__enter__.side_effect = RuntimeError("Fatal hardware failure")
+        mock_client_cls.return_value = mock_client
+
+        self.assertEqual(self.cli.run(self._base_args()), 1)
+        lines = self.mock_stderr.getvalue().splitlines()
+        self.assertEqual(
+            [x for x in lines if "Fatal hardware failure" in x], ["Error: Fatal hardware failure"]
+        )
+        self.assertNotIn("Traceback", self.mock_stderr.getvalue())
+
+    @patch("amcrest_downloader.cli.AmcrestClient")
+    def test_auth_error_prints_one_error_line(self, mock_client_cls):
+        self._enable_logging()
+        mock_client = MagicMock()
+        mock_client.__enter__.side_effect = AmcrestAuthError("bad credentials")
+        mock_client_cls.return_value = mock_client
+
+        self.assertEqual(self.cli.run(self._base_args()), 1)
+        lines = self.mock_stderr.getvalue().splitlines()
+        self.assertEqual([x for x in lines if "bad credentials" in x], ["Error: bad credentials"])
+
+    @patch("amcrest_downloader.cli.AmcrestClient")
+    def test_fatal_error_traceback_logged_at_debug(self, mock_client_cls):
+        self._enable_logging()
+        mock_client = MagicMock()
+        mock_client.__enter__.side_effect = RuntimeError("Fatal hardware failure")
+        mock_client_cls.return_value = mock_client
+
+        self.assertEqual(self.cli.run(self._base_args("--log-level", "debug")), 1)
+        self.assertIn("Traceback", self.mock_stderr.getvalue())
+
+    @patch("amcrest_downloader.cli.AmcrestClient")
+    def test_aware_inputs_for_same_instant_produce_identical_queries(self, mock_client_cls):
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
+        mock_client.find_recordings.return_value = []
+        mock_client.current_time.side_effect = lambda: (
+            datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=8)
+        )
+        mock_client_cls.return_value = mock_client
+
+        queries = []
+        for start, end in (
+            ("2026-01-16T08:00:00-08:00", "2026-01-16T10:00:00-08:00"),
+            ("2026-01-16T16:00:00+00:00", "2026-01-16T18:00:00+00:00"),
+        ):
+            args = self._base_args()
+            args[args.index("--start") + 1] = start
+            args[args.index("--end") + 1] = end
+            self.assertEqual(self.cli.run(args), 0)
+            time_range = mock_client.find_recordings.call_args.args[0]
+            queries.append(time_range.to_amcrest_format())
+
+        self.assertEqual(queries[0], queries[1])
+        self.assertEqual(queries[0], ("2026-01-16 08:00:00", "2026-01-16 10:00:00"))
+
+    @patch("amcrest_downloader.cli.AmcrestClient")
+    def test_naive_inputs_do_not_query_camera_time(self, mock_client_cls):
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
+        mock_client.find_recordings.return_value = []
+        mock_client_cls.return_value = mock_client
+
+        self.assertEqual(self.cli.run(self._base_args()), 0)
+        mock_client.current_time.assert_not_called()
+
+    @patch("amcrest_downloader.cli.AmcrestClient")
+    def test_missing_ffmpeg_fails_before_searching(self, mock_client_cls):
+        with patch("amcrest_downloader.cli.shutil.which", return_value=None):
+            self.assertEqual(self.cli.run(self._base_args()), 1)
+        self.assertIn(
+            "Error: ffmpeg not found. Please install ffmpeg.", self.mock_stderr.getvalue()
+        )
+        mock_client_cls.assert_not_called()
+
+    @patch("amcrest_downloader.cli.AmcrestClient")
+    def test_missing_ffmpeg_allowed_for_list_only(self, mock_client_cls):
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
+        mock_client.find_recordings.return_value = [self._rec()]
+        mock_client_cls.return_value = mock_client
+
+        with patch("amcrest_downloader.cli.shutil.which", return_value=None):
+            self.assertEqual(self.cli.run(self._base_args("--list-only")), 0)
+
+    def _run_with_failing_download(self, download_all, *extra):
+        with (
+            patch("amcrest_downloader.cli.AmcrestClient") as mock_client_cls,
+            patch("amcrest_downloader.cli.RecordingDownloader") as mock_downloader_cls,
+        ):
+            mock_client = MagicMock()
+            mock_client.__enter__.return_value = mock_client
+            mock_client.find_recordings.return_value = [self._rec()]
+            mock_client_cls.return_value = mock_client
+            mock_downloader_cls.return_value.download_all.side_effect = download_all
+            return self.cli.run(self._base_args("--output-dir", str(self.temp_dir), *extra))
+
+    def test_work_dir_removed_when_download_raises(self):
+        def download_all(recordings, work_dir, progress_callback=None):
+            work_dir.mkdir(parents=True)
+            (work_dir / "partial.mp4").write_text("data")
+            raise AmcrestAuthError("bad credentials")
+
+        self.assertEqual(self._run_with_failing_download(download_all), 1)
+        self.assertFalse((self.temp_dir / ".amcrest_download").exists())
+
+    def test_work_dir_removed_when_nothing_downloaded(self):
+        def download_all(recordings, work_dir, progress_callback=None):
+            work_dir.mkdir(parents=True)
+            return []
+
+        self.assertEqual(self._run_with_failing_download(download_all), 1)
+        self.assertFalse((self.temp_dir / ".amcrest_download").exists())
+
+    def test_work_dir_kept_with_keep_files_when_download_raises(self):
+        def download_all(recordings, work_dir, progress_callback=None):
+            work_dir.mkdir(parents=True)
+            raise RuntimeError("boom")
+
+        self.assertEqual(self._run_with_failing_download(download_all, "--keep-files"), 1)
+        self.assertTrue((self.temp_dir / ".amcrest_download").exists())
+
+    def test_work_dir_removed_on_keyboard_interrupt(self):
+        def download_all(recordings, work_dir, progress_callback=None):
+            work_dir.mkdir(parents=True)
+            raise KeyboardInterrupt
+
+        self.assertEqual(self._run_with_failing_download(download_all), 130)
+        self.assertFalse((self.temp_dir / ".amcrest_download").exists())
+
+
+class TestConfigureLogging(unittest.TestCase):
+    def tearDown(self):
+        for handler in logging.getLogger().handlers:
+            handler.close()
+        logging.getLogger().handlers = []
+
+    def test_configure_logging_console(self):
+        configure_logging("info")
+        root = logging.getLogger()
+        self.assertEqual(root.level, logging.INFO)
+        self.assertTrue(any(isinstance(h, logging.StreamHandler) for h in root.handlers))
+
+    def test_configure_logging_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_file = Path(temp_dir) / "test.log"
+            configure_logging("debug", log_file=log_file)
+            root = logging.getLogger()
+            self.assertEqual(root.level, logging.DEBUG)
+            self.assertTrue(any(isinstance(h, logging.FileHandler) for h in root.handlers))
+            logging.getLogger().handlers[0].close()
+
+
+class TestMain(unittest.TestCase):
+    @patch("amcrest_downloader.cli.CLI")
+    def test_main_delegates_to_cli_run(self, mock_cli_cls):
+        mock_cli_cls.return_value.run.return_value = 0
+        self.assertEqual(main(["--help"]), 0)
+        mock_cli_cls.return_value.run.assert_called_once_with(["--help"])
+
+    def test_version_flag(self):
+        with patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(CLI().run(["--version"]), 0)
+        self.assertIn("amcrest-downloader", out.getvalue())
 
 
 if __name__ == "__main__":
     unittest.main()
-
